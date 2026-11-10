@@ -33,8 +33,8 @@ export default tseslint.config(
     },
   },
   {
-    // Relax some rules in test files
-    files: ['**/*.test.ts', '**/__tests__/**/*.ts'],
+    // Relax some rules in test files and CLI scripts
+    files: ['**/*.test.ts', '**/__tests__/**/*.ts', 'src/scripts/**/*.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
