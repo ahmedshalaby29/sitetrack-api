@@ -2,6 +2,7 @@ import { AppError, ErrorCode } from '../../lib/errors.js';
 import type { ProjectsRepo } from './repo.js';
 import type {
   CreateProjectInput,
+  ListProjectsQuery,
   ProjectListResponse,
   ProjectResponse,
   UpdateProjectInput,
@@ -28,12 +29,10 @@ export class ProjectsService {
   async list(
     userId: number,
     isSuperAdmin: boolean,
+    query?: ListProjectsQuery,
+    now?: Date,
   ): Promise<ProjectListResponse> {
-    const projects = await this.repo.listProjects(userId, isSuperAdmin);
-    return {
-      projects,
-      total: projects.length,
-    };
+    return this.repo.listProjects(userId, isSuperAdmin, query, now);
   }
 
   async update(

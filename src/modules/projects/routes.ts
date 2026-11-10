@@ -7,9 +7,11 @@ import { projectGuard, requireProjectAdmin } from '../../plugins/guards.js';
 import { ProjectsRepo } from './repo.js';
 import {
   CreateProjectSchema,
+  ListProjectsQuerySchema,
   ProjectListResponseSchema,
   ProjectResponseSchema,
   UpdateProjectSchema,
+  type ListProjectsQuery,
   type ProjectListResponse,
   type ProjectResponse,
 } from './schemas.js';
@@ -45,12 +47,15 @@ export function projectRoutes(app: FastifyInstance): void {
     },
   );
 
-  // 2. List accessible projects
-  app.withTypeProvider<ZodTypeProvider>().get(
+  // 2. List accessible projects (Screen 4: search, hasLate filter, sort, aggregates)
+  app.withTypeProvider<ZodTypeProvider>().get<{
+    Querystring: ListProjectsQuery;
+  }>(
     '/projects',
     {
       preHandler: [app.authenticate],
       schema: {
+        querystring: ListProjectsQuerySchema,
         response: {
           200: ProjectListResponseSchema,
         },
@@ -61,7 +66,7 @@ export function projectRoutes(app: FastifyInstance): void {
         throw new AppError(401, ErrorCode.UNAUTHENTICATED, 'Unauthenticated');
       }
       const isSuperAdmin = request.auth.appRole === 'super_admin';
-      const result = await service.list(request.auth.userId, isSuperAdmin);
+      const result = await service.list(request.auth.userId, isSuperAdmin, request.query);
       return reply.status(200).send(result);
     },
   );

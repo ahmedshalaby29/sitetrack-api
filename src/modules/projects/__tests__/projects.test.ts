@@ -262,4 +262,213 @@ describe('Project CRUD and sequential counters (real Postgres)', () => {
       expect(dbRes.rows[0]?.deleted_at).toBeInstanceOf(Date);
     });
   });
+
+  describe('Screen 4: Projects list aggregates, search, sort, and filters', () => {
+    it('aggregates task counts, percent done, late count, and blocked count per project', async () => {
+      // Create Project 1 (Hospital)
+      const p1Res = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: {
+          name: 'Central Hospital Extension',
+          startDate: '2026-01-01',
+          endDate: '2026-12-31',
+        },
+      });
+      const p1Id = parseProjectId(p1Res.json<ProjectResponse>().id) ?? 0;
+
+      // Add tasks to Project 1:
+      // Task 1: done
+      // Task 2: in_progress, late (end_date: 2026-01-10 < current date 2026-11-10)
+      // Task 3: not_started, blocked = true
+      // Task 4: not_started, not blocked, not late (end_date: 2026-12-01)
+      await pool.query(
+        `INSERT INTO tasks (project_id, number, name, status, blocked, start_date, end_date)
+         VALUES
+           ($1, 1, 'Excavation', 'done', false, '2026-01-01', '2026-02-01'),
+           ($1, 2, 'Foundation', 'in_progress', false, '2026-02-01', '2026-03-01'),
+           ($1, 3, 'Framing', 'not_started', true, '2026-03-01', '2026-12-15'),
+           ($1, 4, 'Finishing', 'not_started', false, '2026-04-01', '2026-12-01')`,
+        [p1Id],
+      );
+
+      const listRes = await app.inject({
+        method: 'GET',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(listRes.statusCode).toBe(200);
+      const listBody = listRes.json<ProjectListResponse>();
+      expect(listBody.total).toBe(1);
+
+      const proj = listBody.projects[0];
+      expect(proj?.taskCounts).toEqual({
+        total: 4,
+        notStarted: 2,
+        inProgress: 1,
+        blocked: 1,
+        done: 1,
+      });
+      // 1 done out of 4 = 25.0%
+      expect(proj?.percentDone).toBe(25);
+      // Task 2 is in_progress with end_date in past = 1 late task
+      expect(proj?.lateCount).toBe(1);
+      // Task 3 has blocked = true = 1 blocked task
+      expect(proj?.blockedCount).toBe(1);
+    });
+
+    it('searches by name substring and by parsed integer project ID', async () => {
+      // Create Project Alpha and Project Beta
+      const p1 = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'Alpha Tower' },
+      });
+      const p1Id = p1.json<ProjectResponse>().id;
+
+      await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'Beta Stadium' },
+      });
+
+      // Search by name "alpha"
+      const searchName = await app.inject({
+        method: 'GET',
+        url: '/projects?search=alpha',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(searchName.statusCode).toBe(200);
+      const nameBody = searchName.json<ProjectListResponse>();
+      expect(nameBody.total).toBe(1);
+      expect(nameBody.projects[0]?.name).toBe('Alpha Tower');
+
+      // Search by exact formatted ID
+      const searchId = await app.inject({
+        method: 'GET',
+        url: `/projects?search=${p1Id}`,
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(searchId.statusCode).toBe(200);
+      expect(searchId.json<ProjectListResponse>().projects[0]?.id).toBe(p1Id);
+
+      // Search by integer digit
+      const parsedNum = parseProjectId(p1Id) ?? 0;
+      const searchNum = await app.inject({
+        method: 'GET',
+        url: `/projects?search=${String(parsedNum)}`,
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(searchNum.statusCode).toBe(200);
+      expect(searchNum.json<ProjectListResponse>().projects[0]?.id).toBe(p1Id);
+    });
+
+    it('filters projects by hasLate=true', async () => {
+      // Project 1 has a late task
+      const p1 = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'Late Project' },
+      });
+      const p1Id = parseProjectId(p1.json<ProjectResponse>().id) ?? 0;
+      await pool.query(
+        `INSERT INTO tasks (project_id, number, name, status, blocked, start_date, end_date)
+         VALUES ($1, 1, 'Overdue Task', 'in_progress', false, '2026-01-01', '2026-02-01')`,
+        [p1Id],
+      );
+
+      // Project 2 has on-time task
+      const p2 = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'On-time Project' },
+      });
+      const p2Id = parseProjectId(p2.json<ProjectResponse>().id) ?? 0;
+      await pool.query(
+        `INSERT INTO tasks (project_id, number, name, status, blocked, start_date, end_date)
+         VALUES ($1, 1, 'Future Task', 'not_started', false, '2026-12-01', '2026-12-31')`,
+        [p2Id],
+      );
+
+      const lateOnly = await app.inject({
+        method: 'GET',
+        url: '/projects?hasLate=true',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(lateOnly.statusCode).toBe(200);
+      const lateBody = lateOnly.json<ProjectListResponse>();
+      expect(lateBody.total).toBe(1);
+      expect(lateBody.projects[0]?.name).toBe('Late Project');
+    });
+
+    it('sorts projects by name, start_date, percent_done, and late_tasks', async () => {
+      // P1: Name 'Zeta', 100% done, 0 late
+      const p1 = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'Zeta Site', startDate: '2026-05-01' },
+      });
+      const p1Id = parseProjectId(p1.json<ProjectResponse>().id) ?? 0;
+      await pool.query(
+        `INSERT INTO tasks (project_id, number, name, status, blocked, start_date, end_date)
+         VALUES ($1, 1, 'Complete Task', 'done', false, '2026-01-01', '2026-02-01')`,
+        [p1Id],
+      );
+
+      // P2: Name 'Apex', 0% done, 2 late tasks
+      const p2 = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${userToken}` },
+        payload: { name: 'Apex Site', startDate: '2026-01-01' },
+      });
+      const p2Id = parseProjectId(p2.json<ProjectResponse>().id) ?? 0;
+      await pool.query(
+        `INSERT INTO tasks (project_id, number, name, status, blocked, start_date, end_date)
+         VALUES
+           ($1, 1, 'Overdue 1', 'in_progress', false, '2026-01-01', '2026-02-01'),
+           ($1, 2, 'Overdue 2', 'not_started', false, '2026-01-01', '2026-02-01')`,
+        [p2Id],
+      );
+
+      // Sort by name ASC: Apex then Zeta
+      const sortName = await app.inject({
+        method: 'GET',
+        url: '/projects?sort=name&order=asc',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(sortName.json<ProjectListResponse>().projects.map((p) => p.name)).toEqual([
+        'Apex Site',
+        'Zeta Site',
+      ]);
+
+      // Sort by percent_done DESC: Zeta (100%) then Apex (0%)
+      const sortPct = await app.inject({
+        method: 'GET',
+        url: '/projects?sort=percent_done&order=desc',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(sortPct.json<ProjectListResponse>().projects.map((p) => p.name)).toEqual([
+        'Zeta Site',
+        'Apex Site',
+      ]);
+
+      // Sort by late_tasks DESC: Apex (2 late) then Zeta (0 late)
+      const sortLate = await app.inject({
+        method: 'GET',
+        url: '/projects?sort=late_tasks&order=desc',
+        headers: { authorization: `Bearer ${userToken}` },
+      });
+      expect(sortLate.json<ProjectListResponse>().projects.map((p) => p.name)).toEqual([
+        'Apex Site',
+        'Zeta Site',
+      ]);
+    });
+  });
 });

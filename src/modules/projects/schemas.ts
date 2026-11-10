@@ -30,6 +30,15 @@ export const UpdateProjectSchema = z.object({
 });
 export type UpdateProjectInput = z.infer<typeof UpdateProjectSchema>;
 
+export const TaskCountsSchema = z.object({
+  total: z.number(),
+  notStarted: z.number(),
+  inProgress: z.number(),
+  blocked: z.number(),
+  done: z.number(),
+});
+export type TaskCounts = z.infer<typeof TaskCountsSchema>;
+
 export const ProjectResponseSchema = z.object({
   id: z.string(), // Formatted PRJ-XXXX
   name: z.string(),
@@ -39,10 +48,33 @@ export const ProjectResponseSchema = z.object({
   amIAdmin: z.boolean(),
   memberCount: z.number(),
   storeId: z.number().optional(),
+  taskCounts: TaskCountsSchema.optional().default({
+    total: 0,
+    notStarted: 0,
+    inProgress: 0,
+    blocked: 0,
+    done: 0,
+  }),
+  percentDone: z.number().optional().default(0),
+  lateCount: z.number().optional().default(0),
+  blockedCount: z.number().optional().default(0),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type ProjectResponse = z.infer<typeof ProjectResponseSchema>;
+
+export const ListProjectsQuerySchema = z.object({
+  search: z.string().trim().optional(),
+  hasLate: z
+    .union([z.boolean(), z.enum(['true', 'false'])])
+    .transform((val) => val === true || val === 'true')
+    .optional(),
+  sort: z.enum(['name', 'start_date', 'percent_done', 'late_tasks', 'id']).optional().default('id'),
+  order: z.enum(['asc', 'desc']).optional().default('asc'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+export type ListProjectsQuery = z.infer<typeof ListProjectsQuerySchema>;
 
 export const ProjectListResponseSchema = z.object({
   projects: z.array(ProjectResponseSchema),

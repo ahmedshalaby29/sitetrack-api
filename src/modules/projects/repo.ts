@@ -1,26 +1,69 @@
 import type pg from 'pg';
-import { formatProjectId } from '../../lib/ids.js';
+import { formatProjectId, parseProjectId } from '../../lib/ids.js';
 import type {
   CreateProjectInput,
+  ListProjectsQuery,
+  ProjectListResponse,
   ProjectResponse,
   UpdateProjectInput,
 } from './schemas.js';
 
 interface RawProjectRow {
-  id: string;
+  id: string | number;
   name: string;
   description: string | null;
   startDate: string | null;
   endDate: string | null;
   amIAdmin: boolean;
-  memberCount: string;
-  storeId?: string | null;
+  memberCount: string | number;
+  storeId?: string | number | null;
+  totalTasks?: string | number;
+  notStartedCount?: string | number;
+  inProgressCount?: string | number;
+  blockedCount?: string | number;
+  doneCount?: string | number;
+  lateCount?: string | number;
+  percentDone?: string | number;
+  fullCount?: string | number;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export class ProjectsRepo {
   constructor(private readonly pool: pg.Pool) {}
+
+  private mapProject(row: RawProjectRow): ProjectResponse {
+    const total = Number(row.totalTasks ?? 0);
+    const notStarted = Number(row.notStartedCount ?? 0);
+    const inProgress = Number(row.inProgressCount ?? 0);
+    const blocked = Number(row.blockedCount ?? 0);
+    const done = Number(row.doneCount ?? 0);
+    const late = Number(row.lateCount ?? 0);
+    const pct = typeof row.percentDone === 'number' ? row.percentDone : parseFloat(String(row.percentDone ?? 0));
+
+    return {
+      id: formatProjectId(Number(row.id)),
+      name: row.name,
+      description: row.description,
+      startDate: row.startDate,
+      endDate: row.endDate,
+      amIAdmin: row.amIAdmin,
+      memberCount: Number(row.memberCount),
+      storeId: row.storeId ? Number(row.storeId) : undefined,
+      taskCounts: {
+        total,
+        notStarted,
+        inProgress,
+        blocked,
+        done,
+      },
+      percentDone: Number.isNaN(pct) ? 0 : pct,
+      lateCount: late,
+      blockedCount: blocked,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
 
   /**
    * Creates a project atomically with its sequential counter, project admin, and store.
@@ -118,6 +161,16 @@ export class ProjectsRepo {
         amIAdmin: true,
         memberCount: 1,
         storeId,
+        taskCounts: {
+          total: 0,
+          notStarted: 0,
+          inProgress: 0,
+          blocked: 0,
+          done: 0,
+        },
+        percentDone: 0,
+        lateCount: 0,
+        blockedCount: 0,
         createdAt: proj.createdAt.toISOString(),
         updatedAt: proj.updatedAt.toISOString(),
       };
@@ -135,7 +188,9 @@ export class ProjectsRepo {
   async getProjectById(
     projectId: number,
     userId: number,
+    now: Date = new Date(),
   ): Promise<ProjectResponse | null> {
+    const todayUtc = now.toISOString().slice(0, 10);
     const res = await this.pool.query<RawProjectRow>(
       `SELECT
          p.id,
@@ -143,93 +198,184 @@ export class ProjectsRepo {
          p.description,
          p.start_date::text AS "startDate",
          p.end_date::text AS "endDate",
-         COALESCE(m.is_admin, false) AS "amIAdmin",
-         (SELECT count(*)::text FROM project_members pm WHERE pm.project_id = p.id) AS "memberCount",
+         COALESCE(caller_m.is_admin, false) AS "amIAdmin",
+         COALESCE(m_stats.member_count, 0) AS "memberCount",
          s.id AS "storeId",
+         COALESCE(t_stats.total_tasks, 0) AS "totalTasks",
+         COALESCE(t_stats.not_started_count, 0) AS "notStartedCount",
+         COALESCE(t_stats.in_progress_count, 0) AS "inProgressCount",
+         COALESCE(t_stats.blocked_count, 0) AS "blockedCount",
+         COALESCE(t_stats.done_count, 0) AS "doneCount",
+         COALESCE(t_stats.late_count, 0) AS "lateCount",
+         CASE
+           WHEN COALESCE(t_stats.total_tasks, 0) > 0
+           THEN ROUND((COALESCE(t_stats.done_count, 0)::numeric / t_stats.total_tasks) * 100, 1)
+           ELSE 0.0
+         END AS "percentDone",
          p.created_at AS "createdAt",
          p.updated_at AS "updatedAt"
        FROM projects p
-       LEFT JOIN project_members m ON m.project_id = p.id AND m.user_id = $2
+       LEFT JOIN project_members caller_m ON caller_m.project_id = p.id AND caller_m.user_id = $2
        LEFT JOIN stores s ON s.project_id = p.id
+       LEFT JOIN (
+         SELECT pm.project_id, count(*)::int AS member_count
+         FROM project_members pm
+         GROUP BY pm.project_id
+       ) m_stats ON m_stats.project_id = p.id
+       LEFT JOIN (
+         SELECT
+           t.project_id,
+           count(*)::int AS total_tasks,
+           count(*) FILTER (WHERE t.status = 'not_started')::int AS not_started_count,
+           count(*) FILTER (WHERE t.status = 'in_progress')::int AS in_progress_count,
+           count(*) FILTER (WHERE t.blocked = true AND t.status != 'done')::int AS blocked_count,
+           count(*) FILTER (WHERE t.status = 'done')::int AS done_count,
+           count(*) FILTER (WHERE t.status != 'done' AND t.end_date < $3::date)::int AS late_count
+         FROM tasks t
+         GROUP BY t.project_id
+       ) t_stats ON t_stats.project_id = p.id
        WHERE p.id = $1 AND NOT p.is_deleted
        LIMIT 1`,
-      [projectId, userId],
+      [projectId, userId, todayUtc],
     );
 
     const row = res.rows[0];
     if (!row) return null;
 
-    return {
-      id: formatProjectId(Number(row.id)),
-      name: row.name,
-      description: row.description,
-      startDate: row.startDate,
-      endDate: row.endDate,
-      amIAdmin: row.amIAdmin,
-      memberCount: Number(row.memberCount),
-      storeId: row.storeId ? Number(row.storeId) : undefined,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    };
+    return this.mapProject(row);
   }
 
   /**
-   * Lists projects accessible to the caller.
+   * Lists projects accessible to the caller (Screen 4).
+   * Aggregates task counts by status, percent done, late count, blocked count, member count.
+   * Search by name (trigram/substring) or id. Filter by hasLate. Sort by name/start_date/percent_done/late_tasks.
    * Non-SuperAdmin only sees projects they are a member of.
    * SuperAdmin sees all non-deleted projects.
    */
   async listProjects(
     userId: number,
     isSuperAdmin: boolean,
-  ): Promise<ProjectResponse[]> {
-    const query = isSuperAdmin
-      ? `SELECT
-           p.id,
-           p.name,
-           p.description,
-           p.start_date::text AS "startDate",
-           p.end_date::text AS "endDate",
-           COALESCE(m.is_admin, false) AS "amIAdmin",
-           (SELECT count(*)::text FROM project_members pm WHERE pm.project_id = p.id) AS "memberCount",
-           s.id AS "storeId",
-           p.created_at AS "createdAt",
-           p.updated_at AS "updatedAt"
-         FROM projects p
-         LEFT JOIN project_members m ON m.project_id = p.id AND m.user_id = $1
-         LEFT JOIN stores s ON s.project_id = p.id
-         WHERE NOT p.is_deleted
-         ORDER BY p.id ASC`
-      : `SELECT
-           p.id,
-           p.name,
-           p.description,
-           p.start_date::text AS "startDate",
-           p.end_date::text AS "endDate",
-           m.is_admin AS "amIAdmin",
-           (SELECT count(*)::text FROM project_members pm WHERE pm.project_id = p.id) AS "memberCount",
-           s.id AS "storeId",
-           p.created_at AS "createdAt",
-           p.updated_at AS "updatedAt"
-         FROM projects p
-         JOIN project_members m ON m.project_id = p.id AND m.user_id = $1
-         LEFT JOIN stores s ON s.project_id = p.id
-         WHERE NOT p.is_deleted
-         ORDER BY p.id ASC`;
+    query?: ListProjectsQuery,
+    now: Date = new Date(),
+  ): Promise<ProjectListResponse> {
+    const todayUtc = now.toISOString().slice(0, 10);
+    const filterClauses: string[] = ['NOT p.is_deleted'];
+    const filterParams: (string | number | Date)[] = [userId, todayUtc];
+    let paramIndex = 3;
 
-    const res = await this.pool.query<RawProjectRow>(query, [userId]);
+    if (!isSuperAdmin) {
+      filterClauses.push('caller_m.user_id IS NOT NULL');
+    }
 
-    return res.rows.map((row) => ({
-      id: formatProjectId(Number(row.id)),
-      name: row.name,
-      description: row.description,
-      startDate: row.startDate,
-      endDate: row.endDate,
-      amIAdmin: row.amIAdmin,
-      memberCount: Number(row.memberCount),
-      storeId: row.storeId ? Number(row.storeId) : undefined,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    }));
+    if (query?.search) {
+      const s = query.search.trim();
+      const parsedId =
+        parseProjectId(s) ?? (Number.isInteger(Number(s)) && Number(s) > 0 ? Number(s) : null);
+      if (parsedId !== null) {
+        const idIdx = paramIndex++;
+        const nameIdx = paramIndex++;
+        filterClauses.push(`(p.id = $${String(idIdx)} OR p.name ILIKE $${String(nameIdx)})`);
+        filterParams.push(parsedId, `%${s}%`);
+      } else {
+        const nameIdx = paramIndex++;
+        filterClauses.push(`p.name ILIKE $${String(nameIdx)}`);
+        filterParams.push(`%${s}%`);
+      }
+    }
+
+    if (query?.hasLate === true) {
+      filterClauses.push('COALESCE(t_stats.late_count, 0) > 0');
+    }
+
+    // Determine sort clause
+    let sortSql: string;
+    const dir = query?.order === 'desc' ? 'DESC' : 'ASC';
+    switch (query?.sort) {
+      case 'name':
+        sortSql = `p.name ${dir}, p.id ASC`;
+        break;
+      case 'start_date':
+        sortSql = `p.start_date ${dir} NULLS LAST, p.id ASC`;
+        break;
+      case 'percent_done':
+        sortSql = `(CASE WHEN COALESCE(t_stats.total_tasks, 0) > 0 THEN ROUND((COALESCE(t_stats.done_count, 0)::numeric / t_stats.total_tasks) * 100, 1) ELSE 0.0 END) ${dir}, p.id ASC`;
+        break;
+      case 'late_tasks':
+        sortSql = `COALESCE(t_stats.late_count, 0) ${dir}, p.id ASC`;
+        break;
+      case 'id':
+      default:
+        sortSql = `p.id ${dir}`;
+        break;
+    }
+
+    const limit = query?.limit ?? 50;
+    const offset = query?.offset ?? 0;
+    const limitIdx = paramIndex++;
+    const offsetIdx = paramIndex++;
+    const dataParams = [...filterParams, limit, offset];
+
+    const sql = `
+      SELECT
+        p.id,
+        p.name,
+        p.description,
+        p.start_date::text AS "startDate",
+        p.end_date::text AS "endDate",
+        COALESCE(caller_m.is_admin, false) AS "amIAdmin",
+        COALESCE(m_stats.member_count, 0) AS "memberCount",
+        s.id AS "storeId",
+        COALESCE(t_stats.total_tasks, 0) AS "totalTasks",
+        COALESCE(t_stats.not_started_count, 0) AS "notStartedCount",
+        COALESCE(t_stats.in_progress_count, 0) AS "inProgressCount",
+        COALESCE(t_stats.blocked_count, 0) AS "blockedCount",
+        COALESCE(t_stats.done_count, 0) AS "doneCount",
+        COALESCE(t_stats.late_count, 0) AS "lateCount",
+        CASE
+          WHEN COALESCE(t_stats.total_tasks, 0) > 0
+          THEN ROUND((COALESCE(t_stats.done_count, 0)::numeric / t_stats.total_tasks) * 100, 1)
+          ELSE 0.0
+        END AS "percentDone",
+        count(*) OVER() AS "fullCount",
+        p.created_at AS "createdAt",
+        p.updated_at AS "updatedAt"
+      FROM projects p
+      LEFT JOIN project_members caller_m ON caller_m.project_id = p.id AND caller_m.user_id = $1
+      LEFT JOIN stores s ON s.project_id = p.id
+      LEFT JOIN (
+        SELECT pm.project_id, count(*)::int AS member_count
+        FROM project_members pm
+        GROUP BY pm.project_id
+      ) m_stats ON m_stats.project_id = p.id
+      LEFT JOIN (
+        SELECT
+          t.project_id,
+          count(*)::int AS total_tasks,
+          count(*) FILTER (WHERE t.status = 'not_started')::int AS not_started_count,
+          count(*) FILTER (WHERE t.status = 'in_progress')::int AS in_progress_count,
+          count(*) FILTER (WHERE t.blocked = true AND t.status != 'done')::int AS blocked_count,
+          count(*) FILTER (WHERE t.status = 'done')::int AS done_count,
+          count(*) FILTER (WHERE t.status != 'done' AND t.end_date < $2::date)::int AS late_count
+        FROM tasks t
+        GROUP BY t.project_id
+      ) t_stats ON t_stats.project_id = p.id
+      WHERE ${filterClauses.join(' AND ')}
+      ORDER BY ${sortSql}
+      LIMIT $${String(limitIdx)} OFFSET $${String(offsetIdx)}
+    `;
+
+    const res = await this.pool.query<RawProjectRow>(sql, dataParams);
+    if (res.rows.length === 0) {
+      return { projects: [], total: 0 };
+    }
+
+    const total = Number(res.rows[0]?.fullCount ?? res.rows.length);
+    const projects = res.rows.map((row) => this.mapProject(row));
+
+    return {
+      projects,
+      total,
+    };
   }
 
   /**
