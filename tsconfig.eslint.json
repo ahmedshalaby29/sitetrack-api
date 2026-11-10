@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "allowJs": true
+  },
+  "include": [
+    "src/**/*",
+    "src/**/__tests__/**/*.ts",
+    "vitest.config.ts",
+    "eslint.config.js"
+  ],
+  "exclude": ["node_modules", "dist", "coverage"]
+}
