@@ -1,10 +1,19 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { getPool } from '../../lib/db.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
 import { formatProjectId, formatTaskId } from '../../lib/ids.js';
+import {
+  computeBlockedFlags,
+  getAncestors,
+  getDescendants,
+  wouldCreateCycle,
+  type DependencyEdge,
+  type TaskNode,
+} from './graph.js';
 import type {
   CreateTaskBody,
   ListTasksQuery,
+  RelatedTask,
   TaskResponse,
   TaskStatus,
   UpdateTaskBody,
@@ -347,15 +356,348 @@ export class TasksRepo {
 
   /**
    * Deletes a task. Hard delete per Decision 13.
-   * Returns true if deleted, false if not found.
+   * Cascades edges and recomputes blocked flags inside project lock (Decision 6).
    */
   async deleteTask(projectId: number, taskNumber: number): Promise<boolean> {
-    const res = await this.pool.query<{ number: string }>(
-      `DELETE FROM tasks
-       WHERE project_id = $1 AND number = $2
-       RETURNING number`,
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Lock project to serialize graph updates (rule 103)
+      const projRes = await client.query(
+        'SELECT id FROM projects WHERE id = $1 AND NOT is_deleted FOR UPDATE',
+        [projectId],
+      );
+      if (projRes.rowCount === 0) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const res = await client.query<{ number: string }>(
+        `DELETE FROM tasks
+         WHERE project_id = $1 AND number = $2
+         RETURNING number`,
+        [projectId, taskNumber],
+      );
+
+      if (res.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      // Recompute blocked flags for remaining tasks (Decision 6 & rule 105)
+      const tasksRes = await client.query<{ number: string; status: string }>(
+        'SELECT number, status FROM tasks WHERE project_id = $1',
+        [projectId],
+      );
+      const tasks: TaskNode[] = tasksRes.rows.map((r) => ({
+        number: Number(r.number),
+        status: r.status,
+      }));
+
+      const edgesRes = await client.query<{
+        taskNumber: string;
+        dependsOnNumber: string;
+      }>(
+        `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+         FROM task_dependencies
+         WHERE project_id = $1`,
+        [projectId],
+      );
+      const edges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+        taskNumber: Number(r.taskNumber),
+        dependsOnNumber: Number(r.dependsOnNumber),
+      }));
+
+      await syncBlockedFlags(client, projectId, tasks, edges);
+
+      await client.query('COMMIT');
+      return true;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Adds a dependency edge (taskNumber depends on dependsOnNumber).
+   * Locked under SELECT ... FROM projects WHERE id = $1 FOR UPDATE (rule 103).
+   * Enforces Decision 11, cycle detection (409), and recomputes blocked flags (rule 105).
+   */
+  async addDependency(
+    projectId: number,
+    taskNumber: number,
+    dependsOnNumber: number,
+  ): Promise<{ taskId: string; dependsOnId: string }> {
+    if (taskNumber === dependsOnNumber) {
+      throw new AppError(
+        400,
+        ErrorCode.SELF_DEPENDENCY,
+        'A task cannot depend on itself',
+      );
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock project row
+      const projRes = await client.query(
+        'SELECT id FROM projects WHERE id = $1 AND NOT is_deleted FOR UPDATE',
+        [projectId],
+      );
+      if (projRes.rowCount === 0) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      // 2. Load all tasks in project
+      const tasksRes = await client.query<{ number: string; status: string }>(
+        'SELECT number, status FROM tasks WHERE project_id = $1',
+        [projectId],
+      );
+      const tasks: TaskNode[] = tasksRes.rows.map((r) => ({
+        number: Number(r.number),
+        status: r.status,
+      }));
+      const taskMap = new Map<number, TaskNode>(tasks.map((t) => [t.number, t]));
+
+      const targetTask = taskMap.get(taskNumber);
+      const prereqTask = taskMap.get(dependsOnNumber);
+
+      if (!targetTask || !prereqTask) {
+        throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found in project');
+      }
+
+      // 3. Load all existing edges
+      const edgesRes = await client.query<{
+        taskNumber: string;
+        dependsOnNumber: string;
+      }>(
+        `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+         FROM task_dependencies
+         WHERE project_id = $1`,
+        [projectId],
+      );
+      const existingEdges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+        taskNumber: Number(r.taskNumber),
+        dependsOnNumber: Number(r.dependsOnNumber),
+      }));
+
+      // Idempotency: if edge already exists, return ok
+      const alreadyExists = existingEdges.some(
+        (e) => e.taskNumber === taskNumber && e.dependsOnNumber === dependsOnNumber,
+      );
+      if (alreadyExists) {
+        await client.query('COMMIT');
+        return {
+          taskId: formatTaskId(projectId, taskNumber),
+          dependsOnId: formatTaskId(projectId, dependsOnNumber),
+        };
+      }
+
+      // 4. In-memory cycle check (rule 103)
+      if (wouldCreateCycle(existingEdges, { taskNumber, dependsOnNumber })) {
+        throw new AppError(
+          409,
+          ErrorCode.DEPENDENCY_CYCLE,
+          'Adding this dependency would create a cycle',
+        );
+      }
+
+      // 5. Decision 11: rejected if task is in_progress or done while prerequisite is not done
+      if (targetTask.status !== 'not_started') {
+        const prereqAncestors = getAncestors(dependsOnNumber, existingEdges);
+        const allPrereqNums = [dependsOnNumber, ...prereqAncestors.map((a) => a.taskNumber)];
+        const notDonePrereq = allPrereqNums.find((num) => {
+          const t = taskMap.get(num);
+          return t?.status !== 'done';
+        });
+
+        if (notDonePrereq !== undefined) {
+          throw new AppError(
+            409,
+            ErrorCode.PREREQUISITE_NOT_DONE,
+            'Cannot add dependency: task is already started or completed but prerequisite is not done',
+          );
+        }
+      }
+
+      // 6. Insert edge
+      await client.query(
+        `INSERT INTO task_dependencies (project_id, task_number, depends_on_number)
+         VALUES ($1, $2, $3)`,
+        [projectId, taskNumber, dependsOnNumber],
+      );
+
+      // 7. Recompute blocked flags for whole project in the same transaction (rule 105)
+      const updatedEdges = [...existingEdges, { taskNumber, dependsOnNumber }];
+      await syncBlockedFlags(client, projectId, tasks, updatedEdges);
+
+      await client.query('COMMIT');
+
+      return {
+        taskId: formatTaskId(projectId, taskNumber),
+        dependsOnId: formatTaskId(projectId, dependsOnNumber),
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Removes a dependency edge.
+   * Locked under SELECT ... FOR UPDATE, recomputes blocked flags (rule 105).
+   */
+  async removeDependency(
+    projectId: number,
+    taskNumber: number,
+    dependsOnNumber: number,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const projRes = await client.query(
+        'SELECT id FROM projects WHERE id = $1 AND NOT is_deleted FOR UPDATE',
+        [projectId],
+      );
+      if (projRes.rowCount === 0) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const delRes = await client.query(
+        `DELETE FROM task_dependencies
+         WHERE project_id = $1 AND task_number = $2 AND depends_on_number = $3`,
+        [projectId, taskNumber, dependsOnNumber],
+      );
+
+      if (delRes.rowCount === 0) {
+        throw new AppError(
+          404,
+          ErrorCode.DEPENDENCY_NOT_FOUND,
+          'Dependency edge not found',
+        );
+      }
+
+      // Load tasks and remaining edges, recompute blocked flags
+      const tasksRes = await client.query<{ number: string; status: string }>(
+        'SELECT number, status FROM tasks WHERE project_id = $1',
+        [projectId],
+      );
+      const tasks: TaskNode[] = tasksRes.rows.map((r) => ({
+        number: Number(r.number),
+        status: r.status,
+      }));
+
+      const edgesRes = await client.query<{
+        taskNumber: string;
+        dependsOnNumber: string;
+      }>(
+        `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+         FROM task_dependencies
+         WHERE project_id = $1`,
+        [projectId],
+      );
+      const remainingEdges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+        taskNumber: Number(r.taskNumber),
+        dependsOnNumber: Number(r.dependsOnNumber),
+      }));
+
+      await syncBlockedFlags(client, projectId, tasks, remainingEdges);
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Returns all transitive ancestors (prerequisites) and descendants (dependents)
+   * with step distance calculated via in-memory BFS (rules 104 & 114).
+   */
+  async getTaskDependencies(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<{ ancestors: RelatedTask[]; descendants: RelatedTask[] }> {
+    // 1. Verify task exists
+    const taskRes = await this.pool.query(
+      'SELECT number FROM tasks WHERE project_id = $1 AND number = $2',
       [projectId, taskNumber],
     );
-    return res.rowCount !== null && res.rowCount > 0;
+    if (taskRes.rowCount === 0) {
+      throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
+    }
+
+    // 2. Load all edges in the project
+    const edgesRes = await this.pool.query<{
+      taskNumber: string;
+      dependsOnNumber: string;
+    }>(
+      `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+       FROM task_dependencies
+       WHERE project_id = $1`,
+      [projectId],
+    );
+    const existingEdges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+      taskNumber: Number(r.taskNumber),
+      dependsOnNumber: Number(r.dependsOnNumber),
+    }));
+
+    const ancestors = getAncestors(taskNumber, existingEdges).map((a) => ({
+      id: formatTaskId(projectId, a.taskNumber),
+      taskNumber: a.taskNumber,
+      depth: a.depth,
+    }));
+    ancestors.sort((a, b) => a.depth - b.depth || a.taskNumber - b.taskNumber);
+
+    const descendants = getDescendants(taskNumber, existingEdges).map((d) => ({
+      id: formatTaskId(projectId, d.taskNumber),
+      taskNumber: d.taskNumber,
+      depth: d.depth,
+    }));
+    descendants.sort((a, b) => a.depth - b.depth || a.taskNumber - b.taskNumber);
+
+    return {
+      ancestors: ancestors.map((a) => ({ id: a.id, depth: a.depth })),
+      descendants: descendants.map((d) => ({ id: d.id, depth: d.depth })),
+    };
   }
+}
+
+/**
+ * Batch updates the `blocked` column for tasks whose status has changed.
+ */
+async function syncBlockedFlags(
+  client: PoolClient,
+  projectId: number,
+  tasks: TaskNode[],
+  edges: DependencyEdge[],
+): Promise<void> {
+  const blockedMap = computeBlockedFlags(tasks, edges);
+  const taskNums: number[] = [];
+  const blockedVals: boolean[] = [];
+
+  for (const [num, isBlocked] of blockedMap.entries()) {
+    taskNums.push(num);
+    blockedVals.push(isBlocked);
+  }
+
+  if (taskNums.length === 0) return;
+
+  await client.query(
+    `UPDATE tasks AS t
+     SET blocked = v.blocked
+     FROM (
+       SELECT unnest($2::bigint[]) AS num, unnest($3::boolean[]) AS blocked
+     ) AS v
+     WHERE t.project_id = $1 AND t.number = v.num AND t.blocked <> v.blocked`,
+    [projectId, taskNums, blockedVals],
+  );
 }

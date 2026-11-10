@@ -4,6 +4,7 @@ import { TasksRepo } from './repo.js';
 import type {
   CreateTaskBody,
   ListTasksQuery,
+  RelatedTask,
   TaskResponse,
   UpdateTaskBody,
 } from './schemas.js';
@@ -62,5 +63,28 @@ export class TasksService {
     if (!deleted) {
       throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
     }
+  }
+
+  async addDependency(
+    projectId: number,
+    taskNumber: number,
+    dependsOnNumber: number,
+  ): Promise<{ taskId: string; dependsOnId: string }> {
+    return this.repo.addDependency(projectId, taskNumber, dependsOnNumber);
+  }
+
+  async removeDependency(
+    projectId: number,
+    taskNumber: number,
+    dependsOnNumber: number,
+  ): Promise<void> {
+    return this.repo.removeDependency(projectId, taskNumber, dependsOnNumber);
+  }
+
+  async getTaskDependencies(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<{ ancestors: RelatedTask[]; descendants: RelatedTask[] }> {
+    return this.repo.getTaskDependencies(projectId, taskNumber);
   }
 }

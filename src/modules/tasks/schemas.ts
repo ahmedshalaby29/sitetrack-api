@@ -86,3 +86,43 @@ export const TaskListResponseSchema = z.object({
   tasks: z.array(TaskResponseSchema),
   total: z.number(),
 });
+
+export const addDependencyBodySchema = z.object({
+  dependsOn: z.union([
+    z.string().trim().min(1),
+    z.number().int().positive(),
+  ]),
+});
+export type AddDependencyBody = z.infer<typeof addDependencyBodySchema>;
+
+export const dependencyParamsSchema = z.object({
+  projectId: z.string(),
+  taskId: z.string(),
+  dependsOnTaskId: z.string(),
+});
+export type DependencyParams = z.infer<typeof dependencyParamsSchema>;
+
+export const relatedTaskSchema = z.object({
+  id: z.string(),
+  depth: z.number(),
+});
+export type RelatedTask = z.infer<typeof relatedTaskSchema>;
+
+export const taskDependenciesResponseSchema = z.object({
+  ancestors: z.array(relatedTaskSchema),
+  descendants: z.array(relatedTaskSchema),
+});
+export type TaskDependenciesResponse = z.infer<
+  typeof taskDependenciesResponseSchema
+>;
+
+export const singleDependencyResponseSchema = z.object({
+  dependency: z.object({
+    taskId: z.string(),
+    dependsOnId: z.string(),
+  }),
+});
+export type SingleDependencyResponse = z.infer<
+  typeof singleDependencyResponseSchema
+>;
+

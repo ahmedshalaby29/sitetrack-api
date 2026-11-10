@@ -5,9 +5,13 @@ import { AppError, ErrorCode } from '../../lib/errors.js';
 import { parseTaskId } from '../../lib/ids.js';
 import { projectGuard } from '../../plugins/guards.js';
 import {
+  addDependencyBodySchema,
   createTaskBodySchema,
+  dependencyParamsSchema,
   listTasksQuerySchema,
+  singleDependencyResponseSchema,
   SingleTaskResponseSchema,
+  taskDependenciesResponseSchema,
   TaskListResponseSchema,
   taskParamsSchema,
   updateTaskBodySchema,
@@ -28,6 +32,13 @@ function parseTaskParam(rawTaskId: string, currentProjectId: number): number {
     throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
   }
   return num;
+}
+
+function parseDependsOn(val: string | number, currentProjectId: number): number {
+  if (typeof val === 'number') {
+    return val;
+  }
+  return parseTaskParam(val, currentProjectId);
 }
 
 export function taskRoutes(app: FastifyInstance): void {
@@ -148,6 +159,90 @@ export function taskRoutes(app: FastifyInstance): void {
       const taskNumber = parseTaskParam(request.params.taskId, projectId);
       await service.deleteTask(projectId, taskNumber);
       return reply.status(200).send({ status: 'ok' });
+    },
+  );
+
+  // 6. Add dependency edge (task depends on dependsOn)
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/projects/:projectId/tasks/:taskId/dependencies',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: taskParamsSchema,
+        body: addDependencyBodySchema,
+        response: {
+          201: singleDependencyResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const dependsOnNumber = parseDependsOn(request.body.dependsOn, projectId);
+
+      const dependency = await service.addDependency(
+        projectId,
+        taskNumber,
+        dependsOnNumber,
+      );
+      return reply.status(201).send({ dependency });
+    },
+  );
+
+  // 7. Remove dependency edge
+  app.withTypeProvider<ZodTypeProvider>().delete(
+    '/projects/:projectId/tasks/:taskId/dependencies/:dependsOnTaskId',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: dependencyParamsSchema,
+        response: {
+          200: z.object({ status: z.literal('ok') }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const dependsOnNumber = parseTaskParam(
+        request.params.dependsOnTaskId,
+        projectId,
+      );
+
+      await service.removeDependency(projectId, taskNumber, dependsOnNumber);
+      return reply.status(200).send({ status: 'ok' });
+    },
+  );
+
+  // 8. Get task dependencies (ancestors & descendants with depth distance)
+  app.withTypeProvider<ZodTypeProvider>().get(
+    '/projects/:projectId/tasks/:taskId/dependencies',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: taskParamsSchema,
+        response: {
+          200: taskDependenciesResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const result = await service.getTaskDependencies(projectId, taskNumber);
+      return reply.status(200).send(result);
     },
   );
 }
