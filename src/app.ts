@@ -14,6 +14,7 @@ import { userRoutes } from './modules/users/routes.js';
 import { materialRoutes } from './modules/materials/routes.js';
 import { taskRoutes } from './modules/tasks/routes.js';
 import { stockRoutes } from './modules/stock/routes.js';
+import { deliveryRoutes } from './modules/deliveries/routes.js';
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({
@@ -42,6 +43,7 @@ export function buildApp(): FastifyInstance {
   void app.register(memberRoutes);
   void app.register(taskRoutes);
   void app.register(stockRoutes);
+  void app.register(deliveryRoutes);
 
   return app;
 }
