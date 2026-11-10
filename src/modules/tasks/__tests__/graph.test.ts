@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  allowedActions,
   computeBlockedFlags,
   getAncestors,
   getDescendants,
+  isTaskLate,
   wouldCreateCycle,
   type DependencyEdge,
   type TaskNode,
@@ -174,6 +176,127 @@ describe('Task dependency DAG graph logic (pure module)', () => {
 
       const blockedMap = computeBlockedFlags(tasks, edges);
       expect(blockedMap.get(3)).toBe(false);
+    });
+  });
+
+  describe('Allowed actions pure function (allowedActions)', () => {
+    it('allows "start" for not_started task with no prerequisites', () => {
+      expect(allowedActions('not_started', [], [])).toEqual(['start']);
+    });
+
+    it('allows "start" for not_started task when all prerequisites are done', () => {
+      const prereqs = [{ status: 'done' }, { status: 'done' }];
+      expect(allowedActions('not_started', prereqs, [])).toEqual(['start']);
+    });
+
+    it('disallows "start" for not_started task if any prerequisite is not done', () => {
+      expect(
+        allowedActions(
+          'not_started',
+          [{ status: 'done' }, { status: 'in_progress' }],
+          [],
+        ),
+      ).toEqual([]);
+      expect(
+        allowedActions('not_started', [{ status: 'not_started' }], []),
+      ).toEqual([]);
+    });
+
+    it('allows "complete" for in_progress task regardless of prerequisites or dependents', () => {
+      expect(allowedActions('in_progress', [], [])).toEqual(['complete']);
+      expect(
+        allowedActions(
+          'in_progress',
+          [{ status: 'not_started' }],
+          [{ status: 'done' }],
+        ),
+      ).toEqual(['complete']);
+    });
+
+    it('allows "reopen" for done task when all dependents are not_started', () => {
+      expect(allowedActions('done', [], [])).toEqual(['reopen']);
+      expect(
+        allowedActions(
+          'done',
+          [],
+          [{ status: 'not_started' }, { status: 'not_started' }],
+        ),
+      ).toEqual(['reopen']);
+    });
+
+    it('disallows "reopen" for done task if any dependent has started', () => {
+      expect(
+        allowedActions('done', [], [{ status: 'in_progress' }]),
+      ).toEqual([]);
+      expect(
+        allowedActions(
+          'done',
+          [],
+          [{ status: 'not_started' }, { status: 'done' }],
+        ),
+      ).toEqual([]);
+    });
+
+    it('returns empty array for invalid/unknown status', () => {
+      expect(allowedActions('unknown', [], [])).toEqual([]);
+    });
+  });
+
+  describe('Derived late pure function (isTaskLate)', () => {
+    const today = '2026-11-10';
+
+    it('done tasks are NEVER late even if dates are in the past', () => {
+      expect(
+        isTaskLate(
+          { status: 'done', startDate: '2020-01-01', endDate: '2020-01-02' },
+          today,
+        ),
+      ).toBe(false);
+    });
+
+    it('not_started task is late if start_date < today', () => {
+      expect(
+        isTaskLate(
+          { status: 'not_started', startDate: '2026-11-09', endDate: '2026-11-15' },
+          today,
+        ),
+      ).toBe(true);
+    });
+
+    it('not_started task is not late if start_date >= today', () => {
+      expect(
+        isTaskLate(
+          { status: 'not_started', startDate: '2026-11-10', endDate: '2026-11-15' },
+          today,
+        ),
+      ).toBe(false);
+      expect(
+        isTaskLate(
+          { status: 'not_started', startDate: '2026-11-11', endDate: '2026-11-15' },
+          today,
+        ),
+      ).toBe(false);
+    });
+
+    it('in_progress task is late only if end_date < today', () => {
+      expect(
+        isTaskLate(
+          { status: 'in_progress', startDate: '2026-11-01', endDate: '2026-11-09' },
+          today,
+        ),
+      ).toBe(true);
+      expect(
+        isTaskLate(
+          { status: 'in_progress', startDate: '2026-11-01', endDate: '2026-11-10' },
+          today,
+        ),
+      ).toBe(false);
+      expect(
+        isTaskLate(
+          { status: 'in_progress', startDate: '2026-11-01', endDate: '2026-11-20' },
+          today,
+        ),
+      ).toBe(false);
     });
   });
 });

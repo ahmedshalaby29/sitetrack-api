@@ -87,4 +87,40 @@ export class TasksService {
   ): Promise<{ ancestors: RelatedTask[]; descendants: RelatedTask[] }> {
     return this.repo.getTaskDependencies(projectId, taskNumber);
   }
+
+  async startTask(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<TaskResponse> {
+    return this.repo.transitionTaskStatus(
+      projectId,
+      taskNumber,
+      'start',
+      this.clock.today(),
+    );
+  }
+
+  async completeTask(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<TaskResponse> {
+    return this.repo.transitionTaskStatus(
+      projectId,
+      taskNumber,
+      'complete',
+      this.clock.today(),
+    );
+  }
+
+  async reopenTask(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<TaskResponse> {
+    return this.repo.transitionTaskStatus(
+      projectId,
+      taskNumber,
+      'reopen',
+      this.clock.today(),
+    );
+  }
 }

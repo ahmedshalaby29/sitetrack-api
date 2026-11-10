@@ -245,4 +245,76 @@ export function taskRoutes(app: FastifyInstance): void {
       return reply.status(200).send(result);
     },
   );
+
+  // 9. Start task (not_started -> in_progress)
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/projects/:projectId/tasks/:taskId/start',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: taskParamsSchema,
+        response: {
+          200: SingleTaskResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const task = await service.startTask(projectId, taskNumber);
+      return reply.status(200).send({ task });
+    },
+  );
+
+  // 10. Complete task (in_progress -> done)
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/projects/:projectId/tasks/:taskId/complete',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: taskParamsSchema,
+        response: {
+          200: SingleTaskResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const task = await service.completeTask(projectId, taskNumber);
+      return reply.status(200).send({ task });
+    },
+  );
+
+  // 11. Reopen task (done -> in_progress)
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/projects/:projectId/tasks/:taskId/reopen',
+    {
+      preHandler: [projectGuard],
+      schema: {
+        params: taskParamsSchema,
+        response: {
+          200: SingleTaskResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const projectId = request.project?.id;
+      if (!projectId) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      const taskNumber = parseTaskParam(request.params.taskId, projectId);
+      const task = await service.reopenTask(projectId, taskNumber);
+      return reply.status(200).send({ task });
+    },
+  );
 }

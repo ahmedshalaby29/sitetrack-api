@@ -248,3 +248,58 @@ export function computeBlockedFlags(
 
   return blockedMap;
 }
+
+export type TaskAction = 'start' | 'complete' | 'reopen';
+
+/**
+ * Pure function allowedActions(status, prereqs, dependents)
+ * Drives the task-details response, which lists only currently allowed actions (rule 110, 113).
+ *
+ * Rules:
+ * - 'start': (not_started to in_progress, only if every transitive prerequisite is done)
+ * - 'complete': (in_progress to done)
+ * - 'reopen': (done to in_progress, only if no transitive dependent has started, i.e. all are not_started)
+ * Anything else returns [].
+ */
+export function allowedActions(
+  status: string,
+  prereqs: { status: string }[],
+  dependents: { status: string }[],
+): TaskAction[] {
+  if (status === 'not_started') {
+    const allPrereqsDone = prereqs.every((p) => p.status === 'done');
+    return allPrereqsDone ? ['start'] : [];
+  }
+  if (status === 'in_progress') {
+    return ['complete'];
+  }
+  if (status === 'done') {
+    const noDependentStarted = dependents.every(
+      (d) => d.status === 'not_started',
+    );
+    return noDependentStarted ? ['reopen'] : [];
+  }
+  return [];
+}
+
+/**
+ * Pure function to derive whether a task is late (rule 111).
+ * Late: status <> 'done' AND ((status = 'not_started' AND start_date < today) OR end_date < today).
+ * Done is never late.
+ */
+export function isTaskLate(
+  task: { status: string; startDate: string; endDate: string },
+  todayUtc: string,
+): boolean {
+  if (task.status === 'done') {
+    return false;
+  }
+  if (task.status === 'not_started' && task.startDate < todayUtc) {
+    return true;
+  }
+  if (task.endDate < todayUtc) {
+    return true;
+  }
+  return false;
+}
+

@@ -107,7 +107,7 @@ export class TasksRepo {
            blocked,
            to_char(start_date, 'YYYY-MM-DD') AS "startDate",
            to_char(end_date, 'YYYY-MM-DD') AS "endDate",
-           (start_date < $7::date) AS late,
+           (status <> 'done' AND ((status = 'not_started' AND start_date < $7::date) OR end_date < $7::date)) AS late,
            created_at AS "createdAt",
            updated_at AS "updatedAt"`,
         [
@@ -668,6 +668,210 @@ export class TasksRepo {
       ancestors: ancestors.map((a) => ({ id: a.id, depth: a.depth })),
       descendants: descendants.map((d) => ({ id: d.id, depth: d.depth })),
     };
+  }
+
+  /**
+   * Transitions a task's status (start, complete, reopen) under the project row lock.
+   * Recomputes blocked flags for the whole project in the same transaction.
+   *
+   * Rules:
+   * - Rule 110:
+   *   - start: not_started -> in_progress, only if every transitive prerequisite is done
+   *   - complete: in_progress -> done
+   *   - reopen: done -> in_progress, only if no transitive dependent has started (all not_started)
+   *   - Anything else rejected with 409
+   * - Rule 115: locks project row (FOR UPDATE)
+   * - Rule 105: recomputes blocked for the whole project in the same transaction
+   */
+  async transitionTaskStatus(
+    projectId: number,
+    taskNumber: number,
+    action: 'start' | 'complete' | 'reopen',
+    todayUtc: string,
+  ): Promise<TaskResponse> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Serialize all task status and graph changes via project lock (rule 115)
+      const projLock = await client.query(
+        'SELECT id FROM projects WHERE id = $1 FOR UPDATE',
+        [projectId],
+      );
+      if (projLock.rowCount === 0) {
+        throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+      }
+
+      // 2. Load all tasks for the project
+      const tasksRes = await client.query<{ number: string | number; status: string }>(
+        'SELECT number, status FROM tasks WHERE project_id = $1',
+        [projectId],
+      );
+      const allTasks: TaskNode[] = tasksRes.rows.map((r) => ({
+        number: Number(r.number),
+        status: r.status,
+      }));
+
+      const targetTask = allTasks.find((t) => t.number === taskNumber);
+      if (!targetTask) {
+        throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
+      }
+
+      // 3. Load all dependency edges
+      const edgesRes = await client.query<{
+        taskNumber: string | number;
+        dependsOnNumber: string | number;
+      }>(
+        `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+         FROM task_dependencies
+         WHERE project_id = $1`,
+        [projectId],
+      );
+      const allEdges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+        taskNumber: Number(r.taskNumber),
+        dependsOnNumber: Number(r.dependsOnNumber),
+      }));
+
+      // 4. Validate action
+      if (action === 'start') {
+        if (targetTask.status !== 'not_started') {
+          throw new AppError(
+            409,
+            ErrorCode.INVALID_STATUS_TRANSITION,
+            `Cannot start task because it is already '${targetTask.status}'`,
+          );
+        }
+
+        // Transitive prerequisites must all be 'done'
+        const ancestors = getAncestors(taskNumber, allEdges);
+        const taskMap = new Map<number, string>(allTasks.map((t) => [t.number, t.status]));
+        for (const anc of ancestors) {
+          const ancStatus = taskMap.get(anc.taskNumber);
+          if (ancStatus !== 'done') {
+            throw new AppError(
+              409,
+              ErrorCode.PREREQUISITE_NOT_DONE,
+              `Cannot start task because prerequisite task ${formatTaskId(projectId, anc.taskNumber)} is not done`,
+            );
+          }
+        }
+
+        await client.query(
+          `UPDATE tasks
+           SET status = 'in_progress', updated_at = now()
+           WHERE project_id = $1 AND number = $2`,
+          [projectId, taskNumber],
+        );
+        targetTask.status = 'in_progress';
+      } else if (action === 'complete') {
+        if (targetTask.status !== 'in_progress') {
+          throw new AppError(
+            409,
+            ErrorCode.INVALID_STATUS_TRANSITION,
+            `Cannot complete task because it is '${targetTask.status}'`,
+          );
+        }
+
+        await client.query(
+          `UPDATE tasks
+           SET status = 'done', updated_at = now()
+           WHERE project_id = $1 AND number = $2`,
+          [projectId, taskNumber],
+        );
+        targetTask.status = 'done';
+      } else {
+        // action === 'reopen'
+        if (targetTask.status !== 'done') {
+          throw new AppError(
+            409,
+            ErrorCode.INVALID_STATUS_TRANSITION,
+            `Cannot reopen task because it is '${targetTask.status}'`,
+          );
+        }
+
+        // Transitive dependents must all be 'not_started'
+        const descendants = getDescendants(taskNumber, allEdges);
+        const taskMap = new Map<number, string>(allTasks.map((t) => [t.number, t.status]));
+        for (const desc of descendants) {
+          const descStatus = taskMap.get(desc.taskNumber);
+          if (descStatus !== 'not_started') {
+            throw new AppError(
+              409,
+              ErrorCode.DEPENDENT_ALREADY_STARTED,
+              `Cannot reopen task because dependent task ${formatTaskId(projectId, desc.taskNumber)} has already started`,
+            );
+          }
+        }
+
+        await client.query(
+          `UPDATE tasks
+           SET status = 'in_progress', updated_at = now()
+           WHERE project_id = $1 AND number = $2`,
+          [projectId, taskNumber],
+        );
+        targetTask.status = 'in_progress';
+      }
+
+      // 5. Recompute blocked flags across the project in the same transaction (rule 105)
+      await syncBlockedFlags(client, projectId, allTasks, allEdges);
+
+      // 6. Return updated task with derived late
+      const updatedRes = await client.query<{
+        projectId: number;
+        number: string | number;
+        name: string;
+        description: string;
+        status: string;
+        blocked: boolean;
+        startDate: string;
+        endDate: string;
+        late: boolean;
+        createdAt: Date;
+        updatedAt: Date;
+      }>(
+        `SELECT
+           project_id AS "projectId",
+           number,
+           name,
+           description,
+           status,
+           blocked,
+           to_char(start_date, 'YYYY-MM-DD') AS "startDate",
+           to_char(end_date, 'YYYY-MM-DD') AS "endDate",
+           (status <> 'done' AND ((status = 'not_started' AND start_date < $3::date) OR end_date < $3::date)) AS late,
+           created_at AS "createdAt",
+           updated_at AS "updatedAt"
+         FROM tasks
+         WHERE project_id = $1 AND number = $2`,
+        [projectId, taskNumber, todayUtc],
+      );
+
+      await client.query('COMMIT');
+
+      const row = updatedRes.rows[0];
+      if (!row) {
+        throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
+      }
+      return {
+        id: formatTaskId(projectId, Number(row.number)),
+        number: Number(row.number),
+        projectId: formatProjectId(projectId),
+        name: row.name,
+        description: row.description,
+        status: row.status as 'not_started' | 'in_progress' | 'done',
+        blocked: row.blocked,
+        late: row.late,
+        startDate: row.startDate,
+        endDate: row.endDate,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 }
 
