@@ -9,7 +9,7 @@ import {
   type TestActors,
 } from '../../../test/permissionHarness.js';
 import type { CompanyStockListResponse, ProjectStoreResponse } from '../../stock/schemas.js';
-import type { SingleDeliveryResponse } from '../schemas.js';
+import type { DeliveryListResponse, SingleDeliveryResponse } from '../schemas.js';
 
 describe('Deliveries: initiate, record, reject, cancel, atomicity, and concurrency (real Postgres)', () => {
   const pool = getPool();
@@ -463,6 +463,200 @@ describe('Deliveries: initiate, record, reject, cancel, atomicity, and concurren
     });
   });
 
+  describe('Screen 8: Project deliveries screen (GET /projects/:projectId/deliveries)', () => {
+    it('paginates newest first via keyset (created_at DESC, id DESC) and batch-fetches lines without N+1', async () => {
+      const matId = await createMaterial('Keyset Material');
+      await addCompanyStock(matId, '500.000');
+
+      // Create 5 deliveries to project
+      const createdIds: number[] = [];
+      for (let i = 1; i <= 5; i++) {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/company-store/deliveries',
+          headers: { authorization: `Bearer ${actors.managerToken}` },
+          payload: {
+            projectId: actors.formattedProjectId,
+            lines: [{ materialId: matId, quantity: `${String(i)}.000` }],
+          },
+        });
+        expect(res.statusCode).toBe(201);
+        createdIds.push(res.json<SingleDeliveryResponse>().delivery.id);
+      }
+
+      // Expected newest first order is reverse of creation
+      const expectedOrder = [...createdIds].reverse();
+
+      // Page 1: limit 2
+      const page1Res = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?limit=2`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(page1Res.statusCode).toBe(200);
+      const page1 = page1Res.json<DeliveryListResponse>();
+      expect(page1.deliveries.length).toBe(2);
+      expect(page1.hasMore).toBe(true);
+      expect(page1.nextCursor).not.toBeNull();
+      const cursor1 = page1.nextCursor ?? '';
+      expect(page1.deliveries.map((d) => d.id)).toEqual(expectedOrder.slice(0, 2));
+      // Verify batch-fetched line
+      expect(page1.deliveries[0]?.lines[0]?.materialName).toBe('Keyset Material');
+
+      // Page 2: limit 2 with cursor
+      const page2Res = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?limit=2&cursor=${encodeURIComponent(cursor1)}`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(page2Res.statusCode).toBe(200);
+      const page2 = page2Res.json<DeliveryListResponse>();
+      expect(page2.deliveries.length).toBe(2);
+      expect(page2.hasMore).toBe(true);
+      expect(page2.nextCursor).not.toBeNull();
+      const cursor2 = page2.nextCursor ?? '';
+      expect(page2.deliveries.map((d) => d.id)).toEqual(expectedOrder.slice(2, 4));
+
+      // Page 3: limit 2 with cursor (final page)
+      const page3Res = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?limit=2&cursor=${encodeURIComponent(cursor2)}`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(page3Res.statusCode).toBe(200);
+      const page3 = page3Res.json<DeliveryListResponse>();
+      expect(page3.deliveries.length).toBe(1);
+      expect(page3.hasMore).toBe(false);
+      expect(page3.nextCursor).toBeNull();
+      expect(page3.deliveries.map((d) => d.id)).toEqual(expectedOrder.slice(4, 5));
+    });
+
+    it('filters project deliveries by direction, status, and date range', async () => {
+      const matId = await createMaterial('Filter Concrete');
+      await addCompanyStock(matId, '100.000');
+
+      // 1. Inward delivery (to_project, in_transit)
+      const d1Res = await app.inject({
+        method: 'POST',
+        url: '/company-store/deliveries',
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+        payload: {
+          projectId: actors.formattedProjectId,
+          lines: [{ materialId: matId, quantity: '10.000' }],
+        },
+      });
+      const d1Id = d1Res.json<SingleDeliveryResponse>().delivery.id;
+
+      // 2. Inward delivery that gets delivered
+      const d2Res = await app.inject({
+        method: 'POST',
+        url: '/company-store/deliveries',
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+        payload: {
+          projectId: actors.formattedProjectId,
+          lines: [{ materialId: matId, quantity: '20.000' }],
+        },
+      });
+      const d2Id = d2Res.json<SingleDeliveryResponse>().delivery.id;
+      await app.inject({
+        method: 'POST',
+        url: `/projects/${actors.formattedProjectId}/deliveries/${String(d2Id)}/record`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+
+      // Filter by status=delivered
+      const deliveredOnly = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?status=delivered`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(deliveredOnly.statusCode).toBe(200);
+      const deliveredBody = deliveredOnly.json<DeliveryListResponse>();
+      expect(deliveredBody.deliveries.length).toBe(1);
+      expect(deliveredBody.deliveries[0]?.id).toBe(d2Id);
+
+      // Filter by status=in_transit
+      const inTransitOnly = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?status=in_transit`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(inTransitOnly.statusCode).toBe(200);
+      expect(inTransitOnly.json<DeliveryListResponse>().deliveries[0]?.id).toBe(d1Id);
+
+      // Filter by direction=to_company (none exist yet)
+      const returnsOnly = await app.inject({
+        method: 'GET',
+        url: `/projects/${actors.formattedProjectId}/deliveries?direction=to_company`,
+        headers: { authorization: `Bearer ${actors.memberToken}` },
+      });
+      expect(returnsOnly.statusCode).toBe(200);
+      expect(returnsOnly.json<DeliveryListResponse>().deliveries.length).toBe(0);
+    });
+  });
+
+  describe('Screen 11: Company store deliveries screen (GET /company-store/deliveries)', () => {
+    it('lists and filters company deliveries across all projects with projectId and keyset pagination', async () => {
+      const matId = await createMaterial('Cross-project Bricks');
+      await addCompanyStock(matId, '100.000');
+
+      // Create a second project
+      const p2Res = await app.inject({
+        method: 'POST',
+        url: '/projects',
+        headers: { authorization: `Bearer ${actors.adminToken}` },
+        payload: { name: 'Project Two' },
+      });
+      expect(p2Res.statusCode).toBe(201);
+      const p2FormattedId = p2Res.json<{ id: string }>().id;
+
+      // Delivery to Project 1
+      const d1Res = await app.inject({
+        method: 'POST',
+        url: '/company-store/deliveries',
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+        payload: {
+          projectId: actors.formattedProjectId,
+          lines: [{ materialId: matId, quantity: '10.000' }],
+        },
+      });
+      const d1Id = d1Res.json<SingleDeliveryResponse>().delivery.id;
+
+      // Delivery to Project 2
+      const d2Res = await app.inject({
+        method: 'POST',
+        url: '/company-store/deliveries',
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+        payload: {
+          projectId: p2FormattedId,
+          lines: [{ materialId: matId, quantity: '20.000' }],
+        },
+      });
+      const d2Id = d2Res.json<SingleDeliveryResponse>().delivery.id;
+
+      // Query across all projects (newest first: d2 then d1)
+      const allRes = await app.inject({
+        method: 'GET',
+        url: '/company-store/deliveries',
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+      });
+      expect(allRes.statusCode).toBe(200);
+      const allBody = allRes.json<DeliveryListResponse>();
+      expect(allBody.deliveries.map((d) => d.id)).toEqual([d2Id, d1Id]);
+
+      // Filter by projectId = actors.formattedProjectId
+      const p1Only = await app.inject({
+        method: 'GET',
+        url: `/company-store/deliveries?projectId=${actors.formattedProjectId}`,
+        headers: { authorization: `Bearer ${actors.managerToken}` },
+      });
+      expect(p1Only.statusCode).toBe(200);
+      const p1Body = p1Only.json<DeliveryListResponse>();
+      expect(p1Body.deliveries.length).toBe(1);
+      expect(p1Body.deliveries[0]?.id).toBe(d1Id);
+    });
+  });
+
   describe('Permission Matrix: delivery routes', () => {
     it('enforces non-member 404 for project delivery subroutes, 403 for company store delivery subroutes', async () => {
       const matId = await createMaterial('Matrix Sand');
@@ -480,7 +674,19 @@ describe('Deliveries: initiate, record, reject, cancel, atomicity, and concurren
       const deliveryId = delivRes.json<SingleDeliveryResponse>().delivery.id;
 
       const matrixRows: MatrixRow[] = [
-        // Company store delivery endpoints restricted to managers & super admin (non-managers get 403)
+        // Company store delivery list: restricted to managers & super admin
+        {
+          path: '/company-store/deliveries',
+          method: 'GET',
+          expected: {
+            nonMember: 403,
+            member: 403,
+            admin: 403,
+            manager: 200,
+            superAdmin: 200,
+          },
+        },
+        // Company store delivery detail
         {
           path: `/company-store/deliveries/${String(deliveryId)}`,
           method: 'GET',
@@ -492,7 +698,19 @@ describe('Deliveries: initiate, record, reject, cancel, atomicity, and concurren
             superAdmin: 200,
           },
         },
-        // Project delivery sub-resources: non-members get 404 (Rule 2)
+        // Project delivery list: non-members get 404 (Rule 2)
+        {
+          path: '/projects/:projectId/deliveries',
+          method: 'GET',
+          expected: {
+            nonMember: 404,
+            member: 200,
+            admin: 200,
+            manager: 404,
+            superAdmin: 200,
+          },
+        },
+        // Project delivery detail: non-members get 404 (Rule 2)
         {
           path: `/projects/:projectId/deliveries/${String(deliveryId)}`,
           method: 'GET',

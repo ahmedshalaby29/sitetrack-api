@@ -6,11 +6,16 @@ import { projectGuard, requireStoreManager } from '../../plugins/guards.js';
 import { DeliveriesRepo } from './repo.js';
 import {
   companyInitiateDeliveryBodySchema,
+  deliveryListResponseSchema,
   deliveryParamSchema,
+  listCompanyDeliveriesQuerySchema,
+  listDeliveriesQuerySchema,
   projectInitiateDeliveryBodySchema,
   singleDeliveryResponseSchema,
   type CompanyInitiateDeliveryBody,
   type DeliveryParam,
+  type ListCompanyDeliveriesQuery,
+  type ListDeliveriesQuery,
   type ProjectInitiateDeliveryBody,
 } from './schemas.js';
 import { DeliveriesService } from './service.js';
@@ -77,6 +82,34 @@ export function deliveryRoutes(app: FastifyInstance): void {
         });
 
         return reply.status(201).send({ delivery });
+      },
+    );
+
+    // GET /projects/:projectId/deliveries (Screen 8: Project deliveries keyset pagination)
+    projectScoped.get<{
+      Params: { projectId: string };
+      Querystring: ListDeliveriesQuery;
+    }>(
+      '/projects/:projectId/deliveries',
+      {
+        schema: {
+          params: deliveryParamSchema.pick({ projectId: true }),
+          querystring: listDeliveriesQuerySchema,
+          response: { 200: deliveryListResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const projectId = request.project?.id;
+        if (!projectId) {
+          throw new AppError(404, ErrorCode.PROJECT_NOT_FOUND, 'Project not found');
+        }
+
+        const result = await service.listDeliveries({
+          projectId,
+          query: request.query,
+        });
+
+        return reply.status(200).send(result);
       },
     );
 
@@ -229,6 +262,32 @@ export function deliveryRoutes(app: FastifyInstance): void {
         });
 
         return reply.status(201).send({ delivery });
+      },
+    );
+
+    // GET /company-store/deliveries (Screen 11: Company deliveries across all projects with keyset pagination)
+    companyScoped.get<{
+      Querystring: ListCompanyDeliveriesQuery;
+    }>(
+      '/company-store/deliveries',
+      {
+        schema: {
+          querystring: listCompanyDeliveriesQuerySchema,
+          response: { 200: deliveryListResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        let targetProjectId: number | undefined;
+        if (request.query.projectId !== undefined) {
+          targetProjectId = parseTargetProjectId(request.query.projectId);
+        }
+
+        const result = await service.listDeliveries({
+          projectId: targetProjectId,
+          query: request.query,
+        });
+
+        return reply.status(200).send(result);
       },
     );
 

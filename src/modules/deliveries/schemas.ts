@@ -68,3 +68,44 @@ export const singleDeliveryResponseSchema = z.object({
   delivery: deliveryResponseSchema,
 });
 export type SingleDeliveryResponse = z.infer<typeof singleDeliveryResponseSchema>;
+
+// Keyset pagination queries (Rule 152: newest first on (created_at DESC, id DESC))
+export const listDeliveriesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().optional(),
+  direction: deliveryDirectionSchema.optional(),
+  status: deliveryStatusSchema.optional(),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
+});
+export type ListDeliveriesQuery = z.infer<typeof listDeliveriesQuerySchema>;
+
+export const listCompanyDeliveriesQuerySchema = listDeliveriesQuerySchema.extend({
+  projectId: z.union([z.string(), z.number()]).optional(),
+});
+export type ListCompanyDeliveriesQuery = z.infer<typeof listCompanyDeliveriesQuerySchema>;
+
+export const deliveryListResponseSchema = z.object({
+  deliveries: z.array(deliveryResponseSchema),
+  hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
+});
+export type DeliveryListResponse = z.infer<typeof deliveryListResponseSchema>;
+
+export function encodeCursor(createdAt: string | Date, id: number): string {
+  const iso = typeof createdAt === 'string' ? createdAt : createdAt.toISOString();
+  return Buffer.from(JSON.stringify({ c: iso, id })).toString('base64url');
+}
+
+export function decodeCursor(cursor: string): { createdAt: Date; id: number } | null {
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw) as { c: unknown; id: unknown };
+    if (typeof parsed.c !== 'string' || typeof parsed.id !== 'number') return null;
+    const date = new Date(parsed.c);
+    if (Number.isNaN(date.getTime()) || parsed.id <= 0) return null;
+    return { createdAt: date, id: parsed.id };
+  } catch {
+    return null;
+  }
+}

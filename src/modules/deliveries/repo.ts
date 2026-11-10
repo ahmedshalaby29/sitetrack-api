@@ -1,7 +1,14 @@
 import type { Pool, PoolClient } from 'pg';
 import { AppError, ErrorCode } from '../../lib/errors.js';
 import { formatProjectId } from '../../lib/ids.js';
-import type { DeliveryDirection, DeliveryResponse } from './schemas.js';
+import {
+  decodeCursor,
+  encodeCursor,
+  type DeliveryDirection,
+  type DeliveryListResponse,
+  type DeliveryResponse,
+  type ListCompanyDeliveriesQuery,
+} from './schemas.js';
 
 interface RawDeliveryRow {
   id: string | number;
@@ -541,5 +548,156 @@ export class DeliveriesRepo {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Lists deliveries with keyset pagination on (created_at DESC, id DESC).
+   * Prevents N+1 by batch-fetching all lines for the page in a single query.
+   */
+  async listDeliveries(opts: {
+    projectId?: number | undefined;
+    query: ListCompanyDeliveriesQuery;
+  }): Promise<DeliveryListResponse> {
+    const { query } = opts;
+    const limit = query.limit;
+    const filterClauses: string[] = [];
+    const filterParams: (string | number | Date)[] = [];
+    let paramIndex = 1;
+
+    if (opts.projectId !== undefined) {
+      filterClauses.push(`d.project_id = $${String(paramIndex++)}`);
+      filterParams.push(opts.projectId);
+    }
+
+    if (query.direction !== undefined) {
+      filterClauses.push(`d.direction = $${String(paramIndex++)}`);
+      filterParams.push(query.direction);
+    }
+
+    if (query.status !== undefined) {
+      filterClauses.push(`d.status = $${String(paramIndex++)}`);
+      filterParams.push(query.status);
+    }
+
+    if (query.dateFrom !== undefined) {
+      const fromDate = new Date(query.dateFrom);
+      if (!Number.isNaN(fromDate.getTime())) {
+        filterClauses.push(`d.created_at >= $${String(paramIndex++)}`);
+        filterParams.push(fromDate);
+      }
+    }
+
+    if (query.dateTo !== undefined) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(query.dateTo)) {
+        const toDate = new Date(`${query.dateTo}T23:59:59.999Z`);
+        filterClauses.push(`d.created_at <= $${String(paramIndex++)}`);
+        filterParams.push(toDate);
+      } else {
+        const toDate = new Date(query.dateTo);
+        if (!Number.isNaN(toDate.getTime())) {
+          filterClauses.push(`d.created_at <= $${String(paramIndex++)}`);
+          filterParams.push(toDate);
+        }
+      }
+    }
+
+    // Keyset pagination cursor
+    if (query.cursor !== undefined) {
+      const decoded = decodeCursor(query.cursor);
+      if (decoded) {
+        const cDateIdx = paramIndex++;
+        const cIdIdx = paramIndex++;
+        filterClauses.push(
+          `((d.created_at < $${String(cDateIdx)}) OR (d.created_at = $${String(cDateIdx)} AND d.id < $${String(cIdIdx)}))`,
+        );
+        filterParams.push(decoded.createdAt, decoded.id);
+      }
+    }
+
+    const whereClause = filterClauses.length > 0 ? `WHERE ${filterClauses.join(' AND ')}` : '';
+    const limitIdx = paramIndex++;
+    const dataParams = [...filterParams, limit + 1];
+
+    const dataSql = `
+      SELECT
+        d.id,
+        d.project_id,
+        d.direction,
+        d.status,
+        d.sender_user_id,
+        u_sender.name AS sender_name,
+        d.receiver_user_id,
+        u_receiver.name AS receiver_name,
+        d.sent_at,
+        d.received_at,
+        d.created_at
+      FROM deliveries d
+      JOIN users u_sender ON u_sender.id = d.sender_user_id
+      LEFT JOIN users u_receiver ON u_receiver.id = d.receiver_user_id
+      ${whereClause}
+      ORDER BY d.created_at DESC, d.id DESC
+      LIMIT $${String(limitIdx)}
+    `;
+
+    const delivRes = await this.pool.query<RawDeliveryRow>(dataSql, dataParams);
+    const rows = delivRes.rows;
+
+    let hasMore = false;
+    let pageRows = rows;
+    if (rows.length > limit) {
+      hasMore = true;
+      pageRows = rows.slice(0, limit);
+    }
+
+    let nextCursor: string | null = null;
+    if (hasMore && pageRows.length > 0) {
+      const last = pageRows[pageRows.length - 1];
+      if (last) {
+        nextCursor = encodeCursor(last.created_at, Number(last.id));
+      }
+    }
+
+    if (pageRows.length === 0) {
+      return {
+        deliveries: [],
+        hasMore: false,
+        nextCursor: null,
+      };
+    }
+
+    // Batch-fetch all delivery lines for the page in a single query (Rule 42: No N+1!)
+    const deliveryIds = pageRows.map((r) => Number(r.id));
+    const linesRes = await this.pool.query<RawLineRow>(
+      `SELECT
+         dl.delivery_id,
+         dl.material_id,
+         m.name AS material_name,
+         m.category,
+         m.unit,
+         to_char(dl.quantity, 'FM99999999999990.000') AS quantity
+       FROM delivery_lines dl
+       JOIN materials m ON m.id = dl.material_id
+       WHERE dl.delivery_id = ANY($1::bigint[])
+       ORDER BY dl.delivery_id, dl.material_id ASC`,
+      [deliveryIds],
+    );
+
+    const linesByDeliveryId = new Map<number, RawLineRow[]>();
+    for (const line of linesRes.rows) {
+      const dId = Number(line.delivery_id);
+      const list = linesByDeliveryId.get(dId) ?? [];
+      list.push(line);
+      linesByDeliveryId.set(dId, list);
+    }
+
+    const deliveries: DeliveryResponse[] = pageRows.map((r) =>
+      this.mapDelivery(r, linesByDeliveryId.get(Number(r.id)) ?? []),
+    );
+
+    return {
+      deliveries,
+      hasMore,
+      nextCursor,
+    };
   }
 }

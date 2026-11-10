@@ -2,11 +2,20 @@ import { AppError, ErrorCode } from '../../lib/errors.js';
 import type { DeliveriesRepo } from './repo.js';
 import type {
   DeliveryDirection,
+  DeliveryListResponse,
   DeliveryResponse,
+  ListCompanyDeliveriesQuery,
 } from './schemas.js';
 
 export class DeliveriesService {
   constructor(private readonly repo: DeliveriesRepo) {}
+
+  async listDeliveries(opts: {
+    projectId?: number | undefined;
+    query: ListCompanyDeliveriesQuery;
+  }): Promise<DeliveryListResponse> {
+    return this.repo.listDeliveries(opts);
+  }
 
   async getDelivery(deliveryId: number, expectedProjectId?: number): Promise<DeliveryResponse> {
     const delivery = await this.repo.getDeliveryById(deliveryId);
