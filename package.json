@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "seed": "tsx src/scripts/seed.ts",
     "verify": "tsx src/scripts/verify.ts",
+    "benchmark": "tsx src/scripts/benchmark.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",
