@@ -5,6 +5,8 @@ import type {
   CreateTaskBody,
   ListTasksQuery,
   RelatedTask,
+  TaskDetailsResponse,
+  TaskListItemResponse,
   TaskResponse,
   UpdateTaskBody,
 } from './schemas.js';
@@ -22,7 +24,10 @@ export class TasksService {
     return this.repo.createTask(projectId, input, this.clock.today());
   }
 
-  async getTask(projectId: number, taskNumber: number): Promise<TaskResponse> {
+  async getTask(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<TaskListItemResponse> {
     const task = await this.repo.getTask(
       projectId,
       taskNumber,
@@ -34,10 +39,25 @@ export class TasksService {
     return task;
   }
 
+  async getTaskDetails(
+    projectId: number,
+    taskNumber: number,
+  ): Promise<TaskDetailsResponse> {
+    const details = await this.repo.getTaskDetails(
+      projectId,
+      taskNumber,
+      this.clock.today(),
+    );
+    if (!details) {
+      throw new AppError(404, ErrorCode.TASK_NOT_FOUND, 'Task not found');
+    }
+    return details;
+  }
+
   async listTasks(
     projectId: number,
     query: ListTasksQuery,
-  ): Promise<{ tasks: TaskResponse[]; total: number }> {
+  ): Promise<{ tasks: TaskListItemResponse[]; total: number }> {
     return this.repo.listTasks(projectId, query, this.clock.today());
   }
 

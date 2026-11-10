@@ -1,8 +1,9 @@
 import type { Pool, PoolClient } from 'pg';
 import { getPool } from '../../lib/db.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
-import { formatProjectId, formatTaskId } from '../../lib/ids.js';
+import { formatProjectId, formatTaskId, parseTaskId } from '../../lib/ids.js';
 import {
+  allowedActions,
   computeBlockedFlags,
   getAncestors,
   getDescendants,
@@ -14,6 +15,8 @@ import type {
   CreateTaskBody,
   ListTasksQuery,
   RelatedTask,
+  TaskDetailsResponse,
+  TaskListItemResponse,
   TaskResponse,
   TaskStatus,
   UpdateTaskBody,
@@ -29,13 +32,19 @@ interface TaskDbRow {
   late: boolean;
   startDate: string;
   endDate: string;
+  directPrereqs?: (string | number)[];
+  directDependentCount?: string | number;
   createdAt: Date;
   updatedAt: Date;
 }
 
-function mapDbRowToTask(row: TaskDbRow): TaskResponse {
+function mapDbRowToTask(row: TaskDbRow): TaskListItemResponse {
   const pId = Number(row.projectId);
   const num = Number(row.number);
+  const directDependencies = (row.directPrereqs ?? []).map((d) =>
+    formatTaskId(pId, Number(d)),
+  );
+  const directDependentCount = Number(row.directDependentCount ?? 0);
   return {
     id: formatTaskId(pId, num),
     number: num,
@@ -47,6 +56,8 @@ function mapDbRowToTask(row: TaskDbRow): TaskResponse {
     late: row.late,
     startDate: row.startDate,
     endDate: row.endDate,
+    directDependencies,
+    directDependentCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -145,7 +156,7 @@ export class TasksRepo {
     projectId: number,
     taskNumber: number,
     todayUtc: string,
-  ): Promise<TaskResponse | null> {
+  ): Promise<TaskListItemResponse | null> {
     const res = await this.pool.query<TaskDbRow>(
       `SELECT
          t.project_id AS "projectId",
@@ -157,6 +168,16 @@ export class TasksRepo {
          to_char(t.start_date, 'YYYY-MM-DD') AS "startDate",
          to_char(t.end_date, 'YYYY-MM-DD') AS "endDate",
          (t.status <> 'done' AND ((t.status = 'not_started' AND t.start_date < $3::date) OR t.end_date < $3::date)) AS late,
+         COALESCE((
+           SELECT array_agg(d.depends_on_number ORDER BY d.depends_on_number ASC)
+           FROM task_dependencies d
+           WHERE d.project_id = t.project_id AND d.task_number = t.number
+         ), '{}') AS "directPrereqs",
+         COALESCE((
+           SELECT count(*)::int
+           FROM task_dependencies d
+           WHERE d.project_id = t.project_id AND d.depends_on_number = t.number
+         ), 0) AS "directDependentCount",
          t.created_at AS "createdAt",
          t.updated_at AS "updatedAt"
        FROM tasks t
@@ -173,13 +194,93 @@ export class TasksRepo {
   }
 
   /**
-   * Lists tasks for a project with filters, live late derivation, and sorting.
+   * Screen 6: Task details
+   * Returns task metadata with direct dependencies & count,
+   * every prerequisite with step distance, every dependent with step distance,
+   * and currently allowed actions.
+   */
+  async getTaskDetails(
+    projectId: number,
+    taskNumber: number,
+    todayUtc: string,
+  ): Promise<TaskDetailsResponse | null> {
+    const task = await this.getTask(projectId, taskNumber, todayUtc);
+    if (!task) {
+      return null;
+    }
+
+    // Load all tasks and dependency edges for graph computations
+    const [tasksRes, edgesRes] = await Promise.all([
+      this.pool.query<{ number: string | number; status: string }>(
+        'SELECT number, status FROM tasks WHERE project_id = $1',
+        [projectId],
+      ),
+      this.pool.query<{
+        taskNumber: string | number;
+        dependsOnNumber: string | number;
+      }>(
+        `SELECT task_number AS "taskNumber", depends_on_number AS "dependsOnNumber"
+         FROM task_dependencies
+         WHERE project_id = $1`,
+        [projectId],
+      ),
+    ]);
+
+    const allTasks: TaskNode[] = tasksRes.rows.map((r) => ({
+      number: Number(r.number),
+      status: r.status,
+    }));
+    const allEdges: DependencyEdge[] = edgesRes.rows.map((r) => ({
+      taskNumber: Number(r.taskNumber),
+      dependsOnNumber: Number(r.dependsOnNumber),
+    }));
+
+    const taskMap = new Map<number, string>(allTasks.map((t) => [t.number, t.status]));
+
+    // Ancestors (prerequisites) with BFS minimum step distance
+    const ancestors = getAncestors(taskNumber, allEdges);
+    ancestors.sort((a, b) => a.depth - b.depth || a.taskNumber - b.taskNumber);
+    const prerequisites: RelatedTask[] = ancestors.map((a) => ({
+      id: formatTaskId(projectId, a.taskNumber),
+      depth: a.depth,
+    }));
+
+    // Descendants (dependents) with BFS minimum step distance
+    const descendants = getDescendants(taskNumber, allEdges);
+    descendants.sort((a, b) => a.depth - b.depth || a.taskNumber - b.taskNumber);
+    const dependents: RelatedTask[] = descendants.map((d) => ({
+      id: formatTaskId(projectId, d.taskNumber),
+      depth: d.depth,
+    }));
+
+    // Currently allowed actions
+    const prereqNodes = ancestors.map((a) => ({
+      status: taskMap.get(a.taskNumber) ?? 'not_started',
+    }));
+    const dependentNodes = descendants.map((d) => ({
+      status: taskMap.get(d.taskNumber) ?? 'not_started',
+    }));
+
+    const actions = allowedActions(task.status, prereqNodes, dependentNodes);
+
+    return {
+      task,
+      prerequisites,
+      dependents,
+      allowedActions: actions,
+    };
+  }
+
+  /**
+   * Screen 5: Project tasks
+   * List tasks with filters (status, late, blocked, date range, search by id/name)
+   * and sorting (id, name, start, end, status, dependent_count).
    */
   async listTasks(
     projectId: number,
     query: ListTasksQuery,
     todayUtc: string,
-  ): Promise<{ tasks: TaskResponse[]; total: number }> {
+  ): Promise<{ tasks: TaskListItemResponse[]; total: number }> {
     const conditions: string[] = ['t.project_id = $1'];
     const filterParams: (string | number | boolean)[] = [projectId];
     let paramIndex = 2;
@@ -206,16 +307,32 @@ export class TasksRepo {
     }
 
     if (query.search && query.search.length > 0) {
-      const numVal = Number.parseInt(query.search, 10);
-      if (!Number.isNaN(numVal) && numVal > 0) {
+      const term = query.search.trim();
+      let searchNumber: number | null = null;
+      if (/^PRJ-\d+-T-\d+$/i.test(term)) {
+        const parsed = parseTaskId(term.toUpperCase());
+        if (parsed?.projectId === projectId) {
+          searchNumber = parsed.taskNumber;
+        }
+      } else if (/^T-\d+$/i.test(term)) {
+        const num = Number.parseInt(term.slice(2), 10);
+        if (!Number.isNaN(num) && num > 0) searchNumber = num;
+      } else {
+        const numVal = Number.parseInt(term, 10);
+        if (!Number.isNaN(numVal) && numVal > 0 && String(numVal) === term) {
+          searchNumber = numVal;
+        }
+      }
+
+      if (searchNumber !== null) {
         conditions.push(
           `(t.number = $${String(paramIndex)} OR t.name ILIKE '%' || $${String(paramIndex + 1)} || '%')`,
         );
-        filterParams.push(numVal, query.search);
+        filterParams.push(searchNumber, term);
         paramIndex += 2;
       } else {
         conditions.push(`t.name ILIKE '%' || $${String(paramIndex++)} || '%'`);
-        filterParams.push(query.search);
+        filterParams.push(term);
       }
     }
 
@@ -251,6 +368,9 @@ export class TasksRepo {
       case 'status':
         sortColumn = 't.status';
         break;
+      case 'dependent_count':
+        sortColumn = `COALESCE((SELECT count(*)::int FROM task_dependencies d WHERE d.project_id = t.project_id AND d.depends_on_number = t.number), 0)`;
+        break;
       case 'id':
       default:
         sortColumn = 't.number';
@@ -276,6 +396,16 @@ export class TasksRepo {
         to_char(t.start_date, 'YYYY-MM-DD') AS "startDate",
         to_char(t.end_date, 'YYYY-MM-DD') AS "endDate",
         (t.status <> 'done' AND ((t.status = 'not_started' AND t.start_date < $${String(todayIdx)}::date) OR t.end_date < $${String(todayIdx)}::date)) AS late,
+        COALESCE((
+          SELECT array_agg(d.depends_on_number ORDER BY d.depends_on_number ASC)
+          FROM task_dependencies d
+          WHERE d.project_id = t.project_id AND d.task_number = t.number
+        ), '{}') AS "directPrereqs",
+        COALESCE((
+          SELECT count(*)::int
+          FROM task_dependencies d
+          WHERE d.project_id = t.project_id AND d.depends_on_number = t.number
+        ), 0) AS "directDependentCount",
         t.created_at AS "createdAt",
         t.updated_at AS "updatedAt"
       FROM tasks t

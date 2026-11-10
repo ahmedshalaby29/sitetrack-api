@@ -15,6 +15,7 @@ import {
   TaskListResponseSchema,
   taskParamsSchema,
   updateTaskBodySchema,
+  TaskDetailsResponseSchema,
 } from './schemas.js';
 import { TasksService } from './service.js';
 
@@ -66,7 +67,7 @@ export function taskRoutes(app: FastifyInstance): void {
     },
   );
 
-  // 2. List tasks in project
+  // 2. List tasks in project (Screen 5: Project tasks)
   app.withTypeProvider<ZodTypeProvider>().get(
     '/projects/:projectId/tasks',
     {
@@ -89,7 +90,7 @@ export function taskRoutes(app: FastifyInstance): void {
     },
   );
 
-  // 3. Get single task by ID
+  // 3. Get task details by ID (Screen 6: Task details)
   app.withTypeProvider<ZodTypeProvider>().get(
     '/projects/:projectId/tasks/:taskId',
     {
@@ -97,7 +98,7 @@ export function taskRoutes(app: FastifyInstance): void {
       schema: {
         params: taskParamsSchema,
         response: {
-          200: SingleTaskResponseSchema,
+          200: TaskDetailsResponseSchema,
         },
       },
     },
@@ -108,8 +109,8 @@ export function taskRoutes(app: FastifyInstance): void {
       }
 
       const taskNumber = parseTaskParam(request.params.taskId, projectId);
-      const task = await service.getTask(projectId, taskNumber);
-      return reply.status(200).send({ task });
+      const details = await service.getTaskDetails(projectId, taskNumber);
+      return reply.status(200).send(details);
     },
   );
 

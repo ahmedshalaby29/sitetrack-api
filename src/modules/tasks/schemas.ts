@@ -53,13 +53,16 @@ export const listTasksQuerySchema = z.object({
   search: z.string().trim().optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  sort: z.enum(['id', 'name', 'start', 'end', 'status']).default('id'),
+  sort: z.enum(['id', 'name', 'start', 'end', 'status', 'dependent_count']).default('id'),
   order: z.enum(['asc', 'desc']).default('asc'),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
 
 export type ListTasksQuery = z.infer<typeof listTasksQuerySchema>;
+
+export const TaskActionSchema = z.enum(['start', 'complete', 'reopen']);
+export type TaskAction = z.infer<typeof TaskActionSchema>;
 
 export const TaskResponseSchema = z.object({
   id: z.string(),
@@ -72,20 +75,29 @@ export const TaskResponseSchema = z.object({
   late: z.boolean(),
   startDate: z.string(),
   endDate: z.string(),
+  directDependencies: z.array(z.string()).optional(),
+  directDependentCount: z.number().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 
 export type TaskResponse = z.infer<typeof TaskResponseSchema>;
 
+export const TaskListItemResponseSchema = TaskResponseSchema.extend({
+  directDependencies: z.array(z.string()),
+  directDependentCount: z.number(),
+});
+export type TaskListItemResponse = z.infer<typeof TaskListItemResponseSchema>;
+
 export const SingleTaskResponseSchema = z.object({
   task: TaskResponseSchema,
 });
 
 export const TaskListResponseSchema = z.object({
-  tasks: z.array(TaskResponseSchema),
+  tasks: z.array(TaskListItemResponseSchema),
   total: z.number(),
 });
+export type TaskListResponse = z.infer<typeof TaskListResponseSchema>;
 
 export const addDependencyBodySchema = z.object({
   dependsOn: z.union([
@@ -125,4 +137,13 @@ export const singleDependencyResponseSchema = z.object({
 export type SingleDependencyResponse = z.infer<
   typeof singleDependencyResponseSchema
 >;
+
+export const TaskDetailsResponseSchema = z.object({
+  task: TaskListItemResponseSchema,
+  prerequisites: z.array(relatedTaskSchema),
+  dependents: z.array(relatedTaskSchema),
+  allowedActions: z.array(TaskActionSchema),
+});
+export type TaskDetailsResponse = z.infer<typeof TaskDetailsResponseSchema>;
+
 
