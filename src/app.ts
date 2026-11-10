@@ -1,5 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import {
+  jsonSchemaTransform,
   serializerCompiler,
   validatorCompiler,
 } from 'fastify-type-provider-zod';
@@ -29,6 +32,44 @@ export function buildApp(): FastifyInstance {
 
   // Global error → error-envelope mapping (rule 10)
   registerErrorHandler(app);
+
+  // Swagger OpenAPI documentation
+  void app.register(swagger, {
+    openapi: {
+      info: {
+        title: 'SiteTrack API',
+        description:
+          'SiteTrack construction project and materials tracker backend API with DAG task scheduling, stock tracking, and delivery logistics.',
+        version: '0.1.0',
+      },
+      servers: [
+        {
+          url: 'http://localhost:3000',
+          description: 'Local development server',
+        },
+      ],
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT',
+            description: 'JWT access token',
+          },
+        },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    transform: jsonSchemaTransform,
+  });
+
+  void app.register(swaggerUi, {
+    routePrefix: '/docs',
+    uiConfig: {
+      docExpansion: 'list',
+      deepLinking: true,
+    },
+  });
 
   // Plugins
   void app.register(authPlugin);

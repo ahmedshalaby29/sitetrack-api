@@ -13,6 +13,7 @@
     "seed": "tsx src/scripts/seed.ts",
     "verify": "tsx src/scripts/verify.ts",
     "benchmark": "tsx src/scripts/benchmark.ts",
+    "export:openapi": "tsx src/scripts/export-openapi.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",

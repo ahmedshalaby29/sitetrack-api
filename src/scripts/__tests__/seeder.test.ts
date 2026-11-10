@@ -1,8 +1,8 @@
 /**
  * Integration and unit tests for scale seeder and consistency checker.
  */
-import { describe, it, expect } from 'vitest';
-import { parseScaleArg } from '../seed.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { parseScaleArg, runSeeder } from '../seed.js';
 import { verifyDatabase } from '../verify.js';
 
 describe('Scale Seeder & Consistency Checker', () => {
@@ -21,6 +21,10 @@ describe('Scale Seeder & Consistency Checker', () => {
   });
 
   describe('Database consistency verification', () => {
+    beforeAll(async () => {
+      await runSeeder('small');
+    });
+
     it('passes all business invariants on the database', async () => {
       const ok = await verifyDatabase();
       expect(ok).toBe(true);
