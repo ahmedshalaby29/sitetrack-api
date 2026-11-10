@@ -4,6 +4,11 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'node',
+    env: {
+      DATABASE_URL:
+        process.env['DATABASE_URL'] ??
+        'postgres://sitetrack:sitetrack@localhost:5432/sitetrack',
+    },
     // Each test file runs in its own worker with an isolated module graph
     isolate: true,
     // Sequential within a file; allow parallelism across files
