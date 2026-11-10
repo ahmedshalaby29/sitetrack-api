@@ -3,10 +3,10 @@ import { buildApp } from '../../../app.js';
 import { getPool, closePool } from '../../../lib/db.js';
 import { runMigrations } from '../../../lib/migrate.js';
 import { verifyAccessToken } from '../../../lib/tokens.js';
-import type { AuthResponse } from '../schemas.js';
+import type { AuthResponse, MeResponse, RefreshResponse } from '../schemas.js';
 import type { ErrorEnvelope } from '../../../lib/errors.js';
 
-describe('Auth routes: /auth/register and /auth/login (real Postgres)', () => {
+describe('Auth routes: register, login, refresh, logout, /me (real Postgres)', () => {
   const pool = getPool();
   const app = buildApp();
 
@@ -181,7 +181,6 @@ describe('Auth routes: /auth/register and /auth/login (real Postgres)', () => {
 
   describe('POST /auth/login', () => {
     beforeEach(async () => {
-      // Pre-seed a known user
       await app.inject({
         method: 'POST',
         url: '/auth/register',
@@ -245,6 +244,222 @@ describe('Auth routes: /auth/register and /auth/login (real Postgres)', () => {
       expect(unknownBody.error.code).toBe('INVALID_CREDENTIALS');
       expect(wrongPassBody.error.code).toBe('INVALID_CREDENTIALS');
       expect(unknownBody.error.message).toBe(wrongPassBody.error.message);
+    });
+  });
+
+  describe('POST /auth/refresh (token rotation & reuse detection)', () => {
+    it('successfully rotates refresh token and returns new tokens', async () => {
+      const regRes = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          name: 'Refresh User',
+          email: 'refresh@example.com',
+          password: 'Password123!',
+        },
+      });
+      const initialTokens = regRes.json<AuthResponse>();
+
+      const refreshRes = await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: {
+          refreshToken: initialTokens.refreshToken,
+        },
+      });
+
+      expect(refreshRes.statusCode).toBe(200);
+      const newTokens = refreshRes.json<RefreshResponse>();
+      expect(newTokens.accessToken).toBeTruthy();
+      expect(newTokens.refreshToken).toBeTruthy();
+      // Tokens must have been rotated (new values)
+      expect(newTokens.refreshToken).not.toBe(initialTokens.refreshToken);
+
+      // Verify the new access token is valid and shares same user and session
+      const origPayload = await verifyAccessToken(initialTokens.accessToken);
+      const newPayload = await verifyAccessToken(newTokens.accessToken);
+      expect(newPayload.sub).toBe(origPayload.sub);
+      expect(newPayload.sid).toBe(origPayload.sid);
+    });
+
+    it('revokes session immediately upon reuse of an already-rotated refresh token (rule 80)', async () => {
+      const regRes = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          name: 'Reuse User',
+          email: 'reuse@example.com',
+          password: 'Password123!',
+        },
+      });
+      const initialTokens = regRes.json<AuthResponse>();
+
+      // First rotation: rotates token 1 -> token 2
+      const firstRotation = await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: {
+          refreshToken: initialTokens.refreshToken,
+        },
+      });
+      expect(firstRotation.statusCode).toBe(200);
+      const secondTokens = firstRotation.json<RefreshResponse>();
+
+      // Attacker or stale client attempts to reuse token 1
+      const reuseAttempt = await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: {
+          refreshToken: initialTokens.refreshToken,
+        },
+      });
+      expect(reuseAttempt.statusCode).toBe(401);
+      expect(reuseAttempt.json<ErrorEnvelope>().error.code).toBe('UNAUTHENTICATED');
+
+      // Because the whole session was revoked, even token 2 is now invalid!
+      const subsequentAttempt = await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: {
+          refreshToken: secondTokens.refreshToken,
+        },
+      });
+      expect(subsequentAttempt.statusCode).toBe(401);
+      expect(subsequentAttempt.json<ErrorEnvelope>().error.code).toBe('UNAUTHENTICATED');
+
+      // The access token also stops working immediately
+      const meRes = await app.inject({
+        method: 'GET',
+        url: '/me',
+        headers: {
+          authorization: `Bearer ${secondTokens.accessToken}`,
+        },
+      });
+      expect(meRes.statusCode).toBe(401);
+    });
+
+    it('rejects nonexistent or invalid refresh tokens with 401', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: {
+          refreshToken: '0'.repeat(64),
+        },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(res.json<ErrorEnvelope>().error.code).toBe('UNAUTHENTICATED');
+    });
+  });
+
+  describe('POST /auth/logout (session revocation)', () => {
+    it('revokes the session and renders access token invalid on next request (rule 81)', async () => {
+      const regRes = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          name: 'Logout User',
+          email: 'logout@example.com',
+          password: 'Password123!',
+        },
+      });
+      const { accessToken } = regRes.json<AuthResponse>();
+
+      // Verify authenticated access works before logout
+      const beforeMe = await app.inject({
+        method: 'GET',
+        url: '/me',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      expect(beforeMe.statusCode).toBe(200);
+
+      // Perform logout
+      const logoutRes = await app.inject({
+        method: 'POST',
+        url: '/auth/logout',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      expect(logoutRes.statusCode).toBe(200);
+      expect(logoutRes.json()).toEqual({ status: 'ok' });
+
+      // Immediate revocation: next request with same access token fails with 401
+      const afterMe = await app.inject({
+        method: 'GET',
+        url: '/me',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      expect(afterMe.statusCode).toBe(401);
+      expect(afterMe.json<ErrorEnvelope>().error.code).toBe('UNAUTHENTICATED');
+    });
+  });
+
+  describe('GET /me (profile and header)', () => {
+    it('returns current user profile and X-Unread-Notifications header', async () => {
+      const regRes = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          name: 'Me User',
+          email: 'me@example.com',
+          password: 'Password123!',
+          role: 'user',
+        },
+      });
+      const { accessToken, user } = regRes.json<AuthResponse>();
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/me',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['x-unread-notifications']).toBe('0');
+
+      const body = res.json<MeResponse>();
+      expect(body.id).toBe(user.id);
+      expect(body.name).toBe('Me User');
+      expect(body.email).toBe('me@example.com');
+      expect(body.role).toBe('user');
+      expect(body.unreadNotifications).toBe(0);
+    });
+
+    it('reflects DB role changes on the very next request without re-issuing token (rule 1)', async () => {
+      const regRes = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          name: 'Role Change User',
+          email: 'rolechange@example.com',
+          password: 'Password123!',
+          role: 'user',
+        },
+      });
+      const { accessToken, user } = regRes.json<AuthResponse>();
+
+      // Update role directly in the database (e.g. changed by SuperAdmin)
+      await pool.query(
+        "UPDATE users SET app_role = 'super_admin' WHERE id = $1",
+        [user.id],
+      );
+
+      // On next request with old JWT, the new role is immediately active
+      const res = await app.inject({
+        method: 'GET',
+        url: '/me',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<MeResponse>().role).toBe('super_admin');
+    });
+
+    it('rejects unauthenticated requests with 401', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/me',
+      });
+      expect(res.statusCode).toBe(401);
+      expect(res.json<ErrorEnvelope>().error.code).toBe('UNAUTHENTICATED');
     });
   });
 });

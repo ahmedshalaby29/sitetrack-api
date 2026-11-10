@@ -122,4 +122,116 @@ export class AuthRepo {
       createdAt: row.createdAt.toISOString(),
     };
   }
+
+  /**
+   * Finds a session by current or previous refresh token hash.
+   * Used for token rotation and reuse detection.
+   */
+  async findSessionByTokenHash(
+    hash: string,
+  ): Promise<{
+    id: string;
+    userId: number;
+    refreshTokenHash: string;
+    previousRefreshTokenHash: string | null;
+    isRevoked: boolean;
+    expiresAt: Date;
+  } | null> {
+    const res = await this.pool.query<{
+      id: string;
+      userId: string;
+      refreshTokenHash: string;
+      previousRefreshTokenHash: string | null;
+      isRevoked: boolean;
+      expiresAt: Date;
+    }>(
+      `SELECT
+         id,
+         user_id AS "userId",
+         refresh_token_hash AS "refreshTokenHash",
+         previous_refresh_token_hash AS "previousRefreshTokenHash",
+         is_revoked AS "isRevoked",
+         expires_at AS "expiresAt"
+       FROM sessions
+       WHERE refresh_token_hash = $1 OR previous_refresh_token_hash = $1
+       LIMIT 1`,
+      [hash],
+    );
+
+    const row = res.rows[0];
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      userId: Number(row.userId),
+      refreshTokenHash: row.refreshTokenHash,
+      previousRefreshTokenHash: row.previousRefreshTokenHash,
+      isRevoked: row.isRevoked,
+      expiresAt: row.expiresAt,
+    };
+  }
+
+  /**
+   * Rotates a refresh token: stores new hash, moves old hash to previous, updates expiry.
+   */
+  async rotateRefreshToken(
+    sessionId: string,
+    newHash: string,
+    oldHash: string,
+    newExpiresAt: Date,
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE sessions
+       SET refresh_token_hash = $2,
+           previous_refresh_token_hash = $3,
+           expires_at = $4,
+           updated_at = now()
+       WHERE id = $1`,
+      [sessionId, newHash, oldHash, newExpiresAt],
+    );
+  }
+
+  /**
+   * Revokes a session (used on logout and on refresh token reuse detection).
+   */
+  async revokeSession(sessionId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE sessions
+       SET is_revoked = true,
+           revoked_at = now(),
+           updated_at = now()
+       WHERE id = $1`,
+      [sessionId],
+    );
+  }
+
+  /**
+   * Finds a user by ID. Never selects password_hash (rule 9).
+   */
+  async findUserById(userId: number): Promise<UserResponse | null> {
+    const res = await this.pool.query<{
+      id: string;
+      name: string;
+      email: string;
+      role: AppRole;
+      createdAt: Date;
+    }>(
+      `SELECT id, name, email, app_role AS "role", created_at AS "createdAt"
+       FROM users
+       WHERE id = $1
+       LIMIT 1`,
+      [userId],
+    );
+
+    const row = res.rows[0];
+    if (!row) return null;
+
+    return {
+      id: Number(row.id),
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      createdAt: row.createdAt.toISOString(),
+    };
+  }
 }

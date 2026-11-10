@@ -4,6 +4,7 @@ import {
   validatorCompiler,
 } from 'fastify-type-provider-zod';
 import { registerErrorHandler } from './plugins/errorHandler.js';
+import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './modules/health/routes.js';
 import { authRoutes } from './modules/auth/routes.js';
 
@@ -20,6 +21,9 @@ export function buildApp(): FastifyInstance {
 
   // Global error → error-envelope mapping (rule 10)
   registerErrorHandler(app);
+
+  // Plugins
+  void app.register(authPlugin);
 
   // Routes
   void app.register(healthRoutes);

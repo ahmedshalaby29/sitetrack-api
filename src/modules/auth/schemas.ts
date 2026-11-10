@@ -32,3 +32,30 @@ export const AuthResponseSchema = z.object({
   refreshToken: z.string(),
 });
 export type AuthResponse = z.infer<typeof AuthResponseSchema>;
+
+export const RefreshRequestSchema = z.object({
+  refreshToken: z.string().trim().min(1, 'Refresh token is required'),
+});
+export type RefreshRequest = z.infer<typeof RefreshRequestSchema>;
+
+export const RefreshResponseSchema = z.object({
+  accessToken: z.string(),
+  refreshToken: z.string(),
+});
+export type RefreshResponse = z.infer<typeof RefreshResponseSchema>;
+
+export const LogoutResponseSchema = z.object({
+  status: z.literal('ok'),
+});
+export type LogoutResponse = z.infer<typeof LogoutResponseSchema>;
+
+export const MeResponseSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  email: z.string(),
+  role: AppRoleSchema,
+  unreadNotifications: z.number(),
+  createdAt: z.string(),
+});
+export type MeResponse = z.infer<typeof MeResponseSchema>;
+

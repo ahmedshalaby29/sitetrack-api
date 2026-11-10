@@ -13,6 +13,9 @@ import type { AuthRepo } from './repo.js';
 import type {
   AuthResponse,
   LoginRequest,
+  MeResponse,
+  RefreshRequest,
+  RefreshResponse,
   RegisterRequest,
 } from './schemas.js';
 
@@ -143,6 +146,92 @@ export class AuthService {
       },
       accessToken,
       refreshToken: rawRefreshToken,
+    };
+  }
+
+  /**
+   * Rotates a refresh token and issues a new access token.
+   *
+   * Enforces rule 80:
+   * - Opaque refresh token rotated on every use
+   * - Reusing an already-rotated refresh token revokes the entire session
+   */
+  async refresh(input: RefreshRequest): Promise<RefreshResponse> {
+    const incomingHash = hashRefreshToken(input.refreshToken);
+    const session = await this.repo.findSessionByTokenHash(incomingHash);
+
+    if (!session) {
+      throw new AppError(
+        401,
+        ErrorCode.UNAUTHENTICATED,
+        'Invalid refresh token',
+      );
+    }
+
+    // Reuse detection: token matches the previous (already rotated) hash
+    if (session.previousRefreshTokenHash === incomingHash) {
+      await this.repo.revokeSession(session.id);
+      throw new AppError(
+        401,
+        ErrorCode.UNAUTHENTICATED,
+        'Refresh token reuse detected; session has been revoked',
+      );
+    }
+
+    // Check if session is revoked or expired
+    if (session.isRevoked || session.expiresAt < new Date()) {
+      throw new AppError(
+        401,
+        ErrorCode.UNAUTHENTICATED,
+        'Session revoked or expired',
+      );
+    }
+
+    // Rotate token
+    const newRawRefreshToken = generateOpaqueRefreshToken();
+    const newHash = hashRefreshToken(newRawRefreshToken);
+    const newExpiresAt = new Date(Date.now() + SESSION_EXPIRY_MS);
+
+    await this.repo.rotateRefreshToken(
+      session.id,
+      newHash,
+      incomingHash,
+      newExpiresAt,
+    );
+
+    const newAccessToken = await createAccessToken(session.userId, session.id);
+
+    return {
+      accessToken: newAccessToken,
+      refreshToken: newRawRefreshToken,
+    };
+  }
+
+  /**
+   * Revokes the current session (rule 81: logout revokes the session, so its
+   * access token and refresh token stop working immediately).
+   */
+  async logout(sessionId: string): Promise<void> {
+    await this.repo.revokeSession(sessionId);
+  }
+
+  /**
+   * Retrieves profile of current authenticated user.
+   * Rule 69: Unread count returned in /me.
+   */
+  async getMe(userId: number): Promise<MeResponse> {
+    const user = await this.repo.findUserById(userId);
+    if (!user) {
+      throw new AppError(404, ErrorCode.NOT_FOUND, 'User not found');
+    }
+
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      unreadNotifications: 0,
+      createdAt: user.createdAt,
     };
   }
 }
