@@ -225,12 +225,14 @@ export class AuthService {
       throw new AppError(404, ErrorCode.NOT_FOUND, 'User not found');
     }
 
+    const unreadCount = await this.repo.getUnreadNotificationCount(userId);
+
     return {
       id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
-      unreadNotifications: 0,
+      unreadNotifications: unreadCount,
       createdAt: user.createdAt,
     };
   }

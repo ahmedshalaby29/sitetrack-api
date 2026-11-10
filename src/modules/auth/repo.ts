@@ -234,4 +234,17 @@ export class AuthRepo {
       createdAt: row.createdAt.toISOString(),
     };
   }
+
+  /**
+   * Returns count of unread notifications for a user (Decision 9).
+   */
+  async getUnreadNotificationCount(userId: number): Promise<number> {
+    const res = await this.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS "count"
+       FROM invitations
+       WHERE user_id = $1 AND NOT is_read`,
+      [userId],
+    );
+    return Number(res.rows[0]?.count ?? '0');
+  }
 }

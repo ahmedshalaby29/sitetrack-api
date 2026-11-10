@@ -110,8 +110,13 @@ async function authenticateHandler(
   };
 
   // Rule 69: X-Unread-Notifications header on every authenticated response
-  // Default to 0 until invitations table is added in commit 7
-  void reply.header('X-Unread-Notifications', '0');
+  const unreadRes = await pool.query<{ count: string }>(
+    `SELECT count(*)::text AS "count"
+     FROM invitations
+     WHERE user_id = $1 AND NOT is_read`,
+    [row.userId],
+  );
+  void reply.header('X-Unread-Notifications', unreadRes.rows[0]?.count ?? '0');
 }
 
 function authPlugin(
