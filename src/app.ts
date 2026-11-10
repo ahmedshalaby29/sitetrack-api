@@ -12,6 +12,7 @@ import { invitationRoutes } from './modules/invitations/routes.js';
 import { memberRoutes } from './modules/members/routes.js';
 import { userRoutes } from './modules/users/routes.js';
 import { materialRoutes } from './modules/materials/routes.js';
+import { taskRoutes } from './modules/tasks/routes.js';
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({
@@ -38,6 +39,7 @@ export function buildApp(): FastifyInstance {
   void app.register(projectRoutes);
   void app.register(invitationRoutes);
   void app.register(memberRoutes);
+  void app.register(taskRoutes);
 
   return app;
 }
