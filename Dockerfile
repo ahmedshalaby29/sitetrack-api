@@ -29,11 +29,15 @@ ENV HOST=0.0.0.0
 COPY --from=deps /app/node_modules ./node_modules
 # Copy compiled JS from build stage
 COPY --from=build /app/dist ./dist
+# Copy source files so CLI scripts and seeders work seamlessly
+COPY src ./src
 # Copy package.json (needed for "type": "module" resolution)
 COPY package.json ./
 # Copy migrations so the runner can find them at runtime
 # (relative path: dist/lib/migrate.js → ../../migrations)
 COPY migrations ./migrations
+# Copy documentation and schemas
+COPY docs ./docs
 
 EXPOSE 3000
 

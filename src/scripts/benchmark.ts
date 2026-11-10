@@ -16,8 +16,8 @@
  *
  * Enforces latency targets (< 100ms on all screen queries).
  */
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { getPool, closePool } from '../lib/db.js';
 
 process.env['DATABASE_URL'] ??= 'postgres://sitetrack:sitetrack@localhost:5432/sitetrack';
@@ -432,6 +432,7 @@ if (process.argv[1]?.endsWith('benchmark.ts') || process.argv[1]?.endsWith('benc
     .then((results) => {
       const report = generateBenchmarkReport(results);
       const outPath = join(process.cwd(), 'docs/benchmark-results.md');
+      mkdirSync(dirname(outPath), { recursive: true });
       writeFileSync(outPath, report, 'utf8');
       console.log(`Saved benchmark report to ${outPath}`);
       const failed = results.filter((r) => !r.passed);
