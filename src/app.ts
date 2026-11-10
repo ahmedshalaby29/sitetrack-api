@@ -7,6 +7,7 @@ import { registerErrorHandler } from './plugins/errorHandler.js';
 import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './modules/health/routes.js';
 import { authRoutes } from './modules/auth/routes.js';
+import { projectRoutes } from './modules/projects/routes.js';
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({
@@ -28,6 +29,7 @@ export function buildApp(): FastifyInstance {
   // Routes
   void app.register(healthRoutes);
   void app.register(authRoutes);
+  void app.register(projectRoutes);
 
   return app;
 }

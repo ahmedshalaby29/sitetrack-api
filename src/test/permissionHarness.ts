@@ -72,15 +72,23 @@ export async function setupPermissionTestActors(): Promise<TestActors> {
   const manager = await createActor('Manager', `manager_${String(unique)}@test.com`, 'store_manager');
   const superAdmin = await createActor('SuperAdmin', `superadmin_${String(unique)}@test.com`, 'super_admin');
 
-  // Create a project created by admin
-  const projRes = await pool.query<{ id: string }>(
-    `INSERT INTO projects (name, description, created_by_user_id)
-     VALUES ($1, $2, $3)
-     RETURNING id`,
-    ['Test Project', 'Permission Matrix Test', admin.userId],
+  // Allocate project ID via counter (rule 93)
+  const counterRes = await pool.query<{ value: string }>(
+    `UPDATE counters
+     SET value = value + 1
+     WHERE name = 'project'
+     RETURNING value`,
   );
-  const projectId = Number(projRes.rows[0]?.id);
+  const counterRow = counterRes.rows[0];
+  if (!counterRow) throw new Error('Counter not initialized');
+  const projectId = Number(counterRow.value);
   const formattedProjectId = formatProjectId(projectId);
+
+  await pool.query(
+    `INSERT INTO projects (id, name, description, created_by_user_id)
+     VALUES ($1, $2, $3, $4)`,
+    [projectId, 'Test Project', 'Permission Matrix Test', admin.userId],
+  );
 
   // Add admin member
   await pool.query(

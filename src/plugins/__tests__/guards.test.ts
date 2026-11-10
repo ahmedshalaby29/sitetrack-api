@@ -63,6 +63,8 @@ describe('Project guard and authorization matrix (real Postgres)', () => {
   });
 
   beforeEach(async () => {
+    await pool.query('TRUNCATE TABLE stores, project_members, projects, sessions, users RESTART IDENTITY CASCADE');
+    await pool.query("UPDATE counters SET value = 0 WHERE name = 'project'");
     actors = await setupPermissionTestActors();
   });
 
