@@ -90,6 +90,13 @@ export async function setupPermissionTestActors(): Promise<TestActors> {
     [projectId, 'Test Project', 'Permission Matrix Test', admin.userId],
   );
 
+  // Create project store (rule 121)
+  await pool.query(
+    `INSERT INTO stores (project_id, name)
+     VALUES ($1, 'Test Project Store')`,
+    [projectId],
+  );
+
   // Add admin member
   await pool.query(
     `INSERT INTO project_members (project_id, user_id, is_admin)
