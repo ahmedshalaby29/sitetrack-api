@@ -11,7 +11,8 @@ export default defineConfig({
     },
     // Each test file runs in its own worker with an isolated module graph
     isolate: true,
-    // Sequential within a file; allow parallelism across files
+    fileParallelism: false,
+    // Sequential within a file
     sequence: {
       concurrent: false,
     },
