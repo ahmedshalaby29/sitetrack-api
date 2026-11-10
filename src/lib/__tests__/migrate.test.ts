@@ -25,7 +25,7 @@ describe.skipIf(skip)('migration runner (real Postgres)', () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL });
     await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-    await pool.query(`SET search_path TO ${schema}`);
+    await pool.query(`SET search_path TO ${schema}, public`);
   });
 
   afterAll(async () => {
