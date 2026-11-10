@@ -5,6 +5,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { registerErrorHandler } from './plugins/errorHandler.js';
 import { healthRoutes } from './modules/health/routes.js';
+import { authRoutes } from './modules/auth/routes.js';
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({
@@ -22,6 +23,7 @@ export function buildApp(): FastifyInstance {
 
   // Routes
   void app.register(healthRoutes);
+  void app.register(authRoutes);
 
   return app;
 }
